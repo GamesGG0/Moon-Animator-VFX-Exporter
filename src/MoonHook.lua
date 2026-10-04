@@ -552,6 +552,8 @@ function MoonHook.new(onClick: () -> ())
 		Anchor = nil :: GuiObject?,
 		NextSearch = 0,
 		Reported = false,
+		Watchers = {} :: { RBXScriptConnection },
+		SyncLook = nil :: (() -> ())?,
 	}, MoonHook)
 
 	task.spawn(function()
@@ -565,12 +567,64 @@ function MoonHook.new(onClick: () -> ())
 end
 
 function MoonHook:ClearButton()
+	self:Unwatch()
 	if self.Button then
 		self.Button:Destroy()
 	end
 	self.Button = nil
 	self.Mode = nil
 	self.Signature = nil
+end
+
+function MoonHook:Unwatch()
+	for _, connection in self.Watchers do
+		connection:Disconnect()
+	end
+	table.clear(self.Watchers)
+	self.SyncLook = nil
+end
+
+-- Keeps the copy's text looking like Moon's live Options button. A copy taken while Moon's menus
+-- were still disabled would stay grey, and Moon greys out menu items it doesn't recognise, so the
+-- colour is re-applied whenever either label changes. While Options itself is hovered its colour
+-- is left alone, so the copy doesn't pick up Moon's hover highlight.
+function MoonHook:WatchLook(style: GuiObject, button: GuiObject)
+	self:Unwatch()
+
+	local source = primaryText(style) :: any
+	local label = primaryText(button) :: any
+	if not (source and label and source ~= label) then
+		return
+	end
+
+	local sourceHovered = false
+	local function sync()
+		if sourceHovered then
+			return
+		end
+		if label.TextColor3 ~= source.TextColor3 then
+			label.TextColor3 = source.TextColor3
+		end
+		if label.TextTransparency ~= source.TextTransparency then
+			label.TextTransparency = source.TextTransparency
+		end
+	end
+
+	local watchers = self.Watchers
+	table.insert(watchers, style.MouseEnter:Connect(function()
+		sourceHovered = true
+	end))
+	table.insert(watchers, style.MouseLeave:Connect(function()
+		sourceHovered = false
+		task.defer(sync) -- after Moon has restored Options' normal colour
+	end))
+	for _, property in { "TextColor3", "TextTransparency" } do
+		table.insert(watchers, source:GetPropertyChangedSignal(property):Connect(sync))
+		table.insert(watchers, label:GetPropertyChangedSignal(property):Connect(sync))
+	end
+
+	self.SyncLook = sync
+	sync()
 end
 
 -- Logs what's on Moon's top bar once, so a missed Options button can be tracked down.
@@ -663,11 +717,15 @@ function MoonHook:Refresh()
 				local button = cloneItem(style) or plainButton(style.Parent :: GuiObject, style, style.AbsoluteSize.Y)
 				makeClickable(button, self.OnClick)
 				self.Button, self.Mode, self.Signature = button, "Auto", signature
+				self:WatchLook(style, button)
 			end
 
 			local button = self.Button :: GuiObject
 			placeAfter(button, anchor)
 			button.Visible = isShown(anchor)
+			if self.SyncLook then
+				self.SyncLook()
+			end
 			return
 		end
 	end

@@ -715,6 +715,35 @@ do
 	end
 end
 
+-- Moon button colour ---------------------------------------------------------------------------
+
+do
+	local bar = Instance.new("Frame", { Name = "MenuBar" })
+	local options = Instance.new("TextButton", { Name = "Options", Text = "Options", TextColor3 = "white", TextTransparency = 0, Parent = bar })
+	-- A copy taken while Moon's menus were disabled.
+	local copy = Instance.new("TextButton", { Name = "MoonVFXExporterButton", Text = "Export VFX", TextColor3 = "grey", TextTransparency = 0, Parent = bar })
+
+	local hook = setmetatable({ Watchers = {} }, MoonHook)
+	hook:WatchLook(options, copy)
+	check("copy takes Options' live colour", copy.TextColor3 == "white", copy.TextColor3)
+
+	copy.TextColor3 = "grey" -- Moon greys out an item it doesn't know
+	check("copy is re-coloured when greyed out", copy.TextColor3 == "white", copy.TextColor3)
+
+	options.MouseEnter:Fire()
+	options.TextColor3 = "orange" -- Moon's hover highlight on Options
+	check("Options' hover colour isn't copied", copy.TextColor3 == "white", copy.TextColor3)
+	options.TextColor3 = "white"
+	options.MouseLeave:Fire()
+
+	options.TextColor3 = "blue" -- theme change
+	check("follows Options' colour", copy.TextColor3 == "blue", copy.TextColor3)
+
+	hook:Unwatch()
+	copy.TextColor3 = "grey"
+	check("stops syncing once the button is removed", copy.TextColor3 == "grey")
+end
+
 -- Widget (smoke test: builds and drives the window against mocks) ------------------------------
 
 do

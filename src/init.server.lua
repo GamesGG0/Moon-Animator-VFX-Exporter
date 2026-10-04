@@ -307,20 +307,33 @@ local function saveRbxm()
 		return
 	end
 
+	-- The save dialog saves whatever is selected.
 	local previous = Selection:Get()
 	Selection:Set({ module })
-	local ok, saved = pcall(plugin.PromptSaveSelection, plugin, module.Name)
-	Selection:Set(previous)
 
+	-- PromptSaveSelectionAsync replaced the deprecated PromptSaveSelection; older Studio builds
+	-- only have the latter.
+	local hasAsync = pcall(function()
+		return (plugin :: any).PromptSaveSelectionAsync
+	end)
+	local method = if hasAsync then "PromptSaveSelectionAsync" else "PromptSaveSelection"
+	local ok, saved = pcall(function()
+		return (plugin :: any)[method](plugin, module.Name)
+	end)
+
+	local fallback = `You can also right-click {module.Name} in ServerStorage.MoonVFXExports and choose Save to File.`
 	if not ok then
-		ui:SetStatus(`Couldn't save the .rbxm: {saved}`, "error")
+		-- Leave the module selected so Save to File is one right-click away.
+		ui:SetStatus(`Couldn't open the save window: {saved}\n{fallback}`, "error")
+		warn(`[Moon VFX Exporter] {method} failed: {saved}`)
 	elseif saved then
+		Selection:Set(previous)
 		ui:SetStatus(
 			`Saved "{module.Name}" as an .rbxm. Drop it into ReplicatedStorage and call .Play(character, track).`,
 			"ok"
 		)
 	else
-		ui:SetStatus("Save cancelled. The export is still in ServerStorage.MoonVFXExports.", "info")
+		ui:SetStatus(`Not saved (the save window was closed). {fallback}`, "info")
 	end
 end
 

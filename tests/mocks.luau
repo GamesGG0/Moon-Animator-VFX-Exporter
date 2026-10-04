@@ -313,8 +313,12 @@ InstanceMT.__newindex = function(inst, key, value)
 		if value then
 			table.insert(rawget(value, "__data").Children, inst)
 		end
-	else
+	elseif data[key] ~= value then
 		data[key] = value
+		local changed = data["__changed_" .. key]
+		if changed then
+			changed:Fire()
+		end
 	end
 end
 
@@ -576,6 +580,9 @@ local task = {
 		fn(...)
 	end,
 	delay = function(_seconds, fn, ...)
+		fn(...)
+	end,
+	defer = function(fn, ...)
 		fn(...)
 	end,
 }
