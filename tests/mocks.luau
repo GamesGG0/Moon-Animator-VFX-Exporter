@@ -353,10 +353,18 @@ function methods.GetDescendants(inst)
 	return out
 end
 
-function methods.FindFirstChild(inst, name)
+function methods.FindFirstChild(inst, name, recursive)
 	for _, child in rawget(inst, "__data").Children do
 		if child.Name == name then
 			return child
+		end
+	end
+	if recursive then
+		for _, child in rawget(inst, "__data").Children do
+			local found = child:FindFirstChild(name, true)
+			if found then
+				return found
+			end
 		end
 	end
 	return nil

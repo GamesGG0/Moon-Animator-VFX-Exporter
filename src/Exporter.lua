@@ -6,6 +6,7 @@
 --   HumanoidRootPart.CFrame:ToObjectSpace(effectPart.CFrame)
 -- except the CFrames are sampled from the save's keyframes, so nothing has to be scrubbed.
 
+local RigPose = require(script.Parent.RigPose)
 local Sampler = require(script.Parent.Sampler)
 local SaveReader = require(script.Parent.SaveReader)
 
@@ -32,6 +33,9 @@ export type Cue = {
 	-- The VFX object this cue spawns, and its name in the exported VFX folder.
 	Object: Instance?,
 	Asset: string?,
+	-- The character part the effect is connected to (the Offset is from it), or nil for the
+	-- HumanoidRootPart.
+	Parent: string?,
 }
 
 export type Result = {
@@ -47,6 +51,9 @@ type Context = {
 	Anim: SaveReader.Animation,
 	Options: Options,
 	ByInstance: { [Instance]: SaveReader.Item },
+	Poses: { [Instance]: any },
+	-- The main character's rig: the first rig in the animation.
+	MainPose: any,
 }
 
 local function rootPartOf(model: Instance): BasePart?
@@ -76,6 +83,35 @@ local function sampleTrack(ctx: Context, inst: Instance, prop: string, frame: nu
 	return nil
 end
 
+-- The pose of the animated rig `inst` is part of (or is), if any.
+local function poseOf(ctx: Context, inst: Instance?): any
+	local node = inst
+	while node and node ~= game do
+		local pose = ctx.Poses[node]
+		if pose then
+			return pose
+		end
+		node = node.Parent
+	end
+	return nil
+end
+
+-- A part with no keys of its own still moves if it sits inside a model whose CFrame is keyed:
+-- Moon moves the whole model.
+local function movedWithModel(ctx: Context, part: BasePart, frame: number): CFrame?
+	local node = part.Parent
+	while node and node ~= game do
+		if node:IsA("Model") then
+			local pivot = sampleTrack(ctx, node, "CFrame", frame)
+			if typeof(pivot) == "CFrame" then
+				return pivot * node:GetPivot():ToObjectSpace(part.CFrame)
+			end
+		end
+		node = node.Parent
+	end
+	return nil
+end
+
 -- World CFrame of `inst` at `frame`. The second return is a note when the value is a guess.
 local function cframeAt(ctx: Context, inst: Instance, frame: number): (CFrame?, string?)
 	local keyed = sampleTrack(ctx, inst, "CFrame", frame)
@@ -90,13 +126,34 @@ local function cframeAt(ctx: Context, inst: Instance, frame: number): (CFrame?, 
 			return inst.CFrame.Rotation + position, nil
 		end
 
-		if not inst.Anchored then
-			return inst.CFrame, `{inst.Name} has no CFrame keys and isn't anchored; used its current position`
+		-- Inside an animated rig: posed from the rig's keys, not from where the playhead was left.
+		local pose = poseOf(ctx, inst)
+		if pose then
+			return pose:CFrameAt(inst, frame), nil
+		end
+
+		local moved = movedWithModel(ctx, inst, frame)
+		if moved then
+			return moved, nil
+		end
+
+		-- A loose part stays where it is. One jointed to something we can't follow is a guess.
+		local ok, joints = pcall(function()
+			return (inst :: any):GetJoints()
+		end)
+		if not inst.Anchored and ok and type(joints) == "table" and #joints > 0 then
+			return inst.CFrame, `{inst.Name} is jointed to something that isn't animated here; used its current position`
 		end
 		return inst.CFrame, nil
 	elseif inst:IsA("Model") then
 		if typeof(keyed) == "CFrame" then
 			return keyed, nil
+		end
+
+		local pose = poseOf(ctx, inst.Parent)
+		local anchor = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true)
+		if pose and anchor then
+			return pose:CFrameAt(anchor, frame) * anchor.CFrame:ToObjectSpace(inst:GetPivot()), nil
 		end
 		return inst:GetPivot(), nil
 	elseif inst:IsA("Attachment") then
@@ -106,6 +163,13 @@ local function cframeAt(ctx: Context, inst: Instance, frame: number): (CFrame?, 
 			local parentCFrame, note = cframeAt(ctx, parent, frame)
 			if parentCFrame then
 				return parentCFrame * localCFrame, note
+			end
+		elseif parent and parent:IsA("Attachment") then
+			-- Roblox gives an attachment inside another attachment no position of its own; treat
+			-- its CFrame as relative to the outer one.
+			local parentCFrame, note = cframeAt(ctx, parent, frame)
+			if parentCFrame then
+				return parentCFrame * localCFrame, note or `{inst.Name} is inside another attachment; placed relative to it`
 			end
 		end
 		return inst.WorldCFrame, nil
@@ -121,25 +185,19 @@ local function cframeAt(ctx: Context, inst: Instance, frame: number): (CFrame?, 
 	return nil, nil
 end
 
--- The origin moves only if its own CFrame or its rig's CFrame is keyed.
+-- The origin (a HumanoidRootPart, or a body part an effect is parented to) at `frame`.
 local function originAt(ctx: Context, origin: BasePart, frame: number): CFrame
 	local keyed = sampleTrack(ctx, origin, "CFrame", frame)
 	if typeof(keyed) == "CFrame" then
 		return keyed
 	end
 
-	local node = origin.Parent
-	while node and node ~= game do
-		if node:IsA("Model") then
-			local pivot = sampleTrack(ctx, node, "CFrame", frame)
-			if typeof(pivot) == "CFrame" then
-				return pivot * node:GetPivot():ToObjectSpace(origin.CFrame)
-			end
-		end
-		node = node.Parent
+	local pose = poseOf(ctx, origin)
+	if pose then
+		return pose:CFrameAt(origin, frame)
 	end
 
-	return origin.CFrame
+	return movedWithModel(ctx, origin, frame) or origin.CFrame
 end
 
 -- Follows instance paths written in event code, e.g. workspace["Ripper Test"].ImpactAnti
@@ -293,9 +351,15 @@ function Exporter.assignAssets(cues: { Cue })
 	end
 end
 
+-- Offsets are measured from the main character: the picked origin, or the first rig in the
+-- animation. In game the cues play on one character, so an effect on another rig (a victim, say)
+-- is still placed relative to the main one.
 local function originFor(ctx: Context, target: Instance): BasePart?
 	if ctx.Options.Origin then
 		return ctx.Options.Origin
+	end
+	if ctx.MainPose then
+		return ctx.MainPose.Root
 	end
 
 	local node: Instance? = target
@@ -317,6 +381,50 @@ local function originFor(ctx: Context, target: Instance): BasePart?
 	end
 
 	return nil
+end
+
+-- The part of the main character an effect is connected to, when it isn't the HumanoidRootPart.
+-- Set by a "Parent" key in the event's Events tab, or worked out from the VFX object:
+--   a part Moon animates through a joint (a limb, an animated weapon)  -> that part itself
+--   an attachment, or a part jointed or welded to the rig              -> the part it hangs off
+local function parentFor(ctx: Context, marker: SaveReader.Marker, object: Instance): (BasePart?, string?)
+	local main = ctx.MainPose
+
+	local explicit: string? = nil
+	for key, value in marker.Keys do
+		if string.lower(key) == "parent" then
+			explicit = value
+		end
+	end
+
+	if explicit then
+		if explicit == "" or not main or explicit == main.Root.Name then
+			return nil, nil
+		end
+		local part = main.Rig:FindFirstChild(explicit, true)
+		if part and part:IsA("BasePart") then
+			return part, nil
+		end
+		return nil, `Parent "{explicit}" isn't a part of {main.Rig.Name}, so this is measured from the HumanoidRootPart`
+	end
+
+	local pose = poseOf(ctx, object)
+	if not pose or pose ~= main or object == pose.Root then
+		return nil, nil
+	end
+
+	if object:IsA("BasePart") then
+		local motor = pose.Motors[object]
+		if motor and pose.JointTracks[motor] then
+			return object, nil
+		end
+	end
+
+	local attached = pose:AttachedTo(object)
+	if attached and attached ~= pose.Root and attached ~= object then
+		return attached, nil
+	end
+	return nil, nil
 end
 
 -- Two events on the same frame would overwrite each other as table keys, so the later one is
@@ -411,11 +519,20 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 		Anim = anim,
 		Options = options,
 		ByInstance = {},
+		Poses = {},
 	}
 
 	for _, item in anim.Items do
-		if item.Instance then
-			ctx.ByInstance[item.Instance] = item
+		local inst = item.Instance
+		if inst then
+			ctx.ByInstance[inst] = item
+
+			local root = rootPartOf(inst)
+			if inst:IsA("Model") and root then
+				local pose = RigPose.new(inst, root, item.Tracks.CFrame, item.Joints, options.MoonEasing)
+				ctx.Poses[inst] = pose
+				ctx.MainPose = ctx.MainPose or pose
+			end
 		end
 	end
 
@@ -443,8 +560,20 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 			end
 
 			local offset = CFrame.new()
+			local parentPart: BasePart? = nil
 			if target then
-				local origin = originFor(ctx, target)
+				local parentNote
+				parentPart, parentNote = parentFor(ctx, marker, object or target)
+				if parentNote then
+					table.insert(notes, parentNote)
+				end
+
+				local otherRig = poseOf(ctx, object or target)
+				if ctx.MainPose and otherRig and otherRig ~= ctx.MainPose and not ctx.Options.Origin then
+					table.insert(notes, `on {otherRig.Rig.Name}, not {ctx.MainPose.Rig.Name}; placed relative to {ctx.MainPose.Rig.Name}`)
+				end
+
+				local origin = parentPart or originFor(ctx, target)
 				local targetCFrame, cfNote = cframeAt(ctx, target, marker.Frame)
 
 				if not origin then
@@ -472,6 +601,7 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 				Offset = offset,
 				Notes = notes,
 				Object = object,
+				Parent = if parentPart then parentPart.Name else nil,
 			})
 		end
 	end

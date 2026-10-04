@@ -303,7 +303,23 @@ do
 	marker(folder("MarkerTrack", folder("2", movingSave)), 60, "Burst")
 
 	local movingResult = Exporter.collect(SaveReader.load(movingSave), { EffectName = "Event" })
-	check("follows a keyed rig", cfNear(movingResult.Cues[1].Offset, moved:ToObjectSpace(shine.CFrame)))
+	-- Shine sits inside the rig with no keys of its own, so Moon carries it along with the rig.
+	check("a part inside a moving rig moves with it", cfNear(movingResult.Cues[1].Offset, hrpCFrame:ToObjectSpace(shine.CFrame)))
+
+	-- A part outside the rig stays put while the rig moves away from it.
+	local post = Instance.new("Part", { Name = "Post", CFrame = hrpCFrame * CFrame.new(0, 0, -4), Parent = game:GetService("Workspace") })
+	local postSave = value("StringValue", "MovingPast", mockJson({
+		Information = { Length = 120, FPS = 60, Modified = 1640000000 },
+		Items = { { Path = path("Ripper Test") }, { Path = { InstanceNames = { "Game", "Workspace", "Post" }, InstanceTypes = { "DataModel", "Workspace", "Part" }, ItemType = "BasePart" } } },
+	}), saves)
+	local postRigTrack = folder("CFrame", folder("1", postSave))
+	keyframe(postRigTrack, 0, { hrpCFrame })
+	keyframe(postRigTrack, 60, { moved })
+	marker(folder("MarkerTrack", folder("2", postSave)), 60, "Pass")
+	local postResult = Exporter.collect(SaveReader.load(postSave), { EffectName = "Event" })
+	check("a part outside the rig stays put", cfNear(postResult.Cues[1].Offset, moved:ToObjectSpace(post.CFrame)))
+	post.Parent = nil
+	postSave.Parent = nil
 	movingSave.Parent = nil
 end
 
@@ -403,6 +419,234 @@ _G.MoonGlobal = { ready = true, EasingFunctions = { QuadOut = function(t)
 end } }
 check("exposes Moon easing", MoonHook.getEasingFunctions() ~= nil)
 _G.MoonGlobal = nil
+
+-- Rig posing: the Iron Clash case --------------------------------------------------------------
+-- The rig lunges 40 studs early on. Its effect parts sit inside the rig with no keys, so Moon
+-- carries them along. The exporter used to read their live position, which depends on where
+-- Moon's playhead was left, and put every effect 40 studs behind the character.
+
+local function ironClash(parkedAfterLunge: boolean)
+	local workspace = game:GetService("Workspace")
+	local start = CFrame.new(0, 3, 0)
+	local lunge = start * CFrame.new(0, 0, -40)
+	local slashLocal = CFrame.new(0, 0, -3) * CFrame.Angles(0, 0.4, 0)
+	local parked = if parkedAfterLunge then lunge else start
+
+	local rig = Instance.new("Model", { Name = "Ripper", Parent = workspace })
+	local root = Instance.new("Part", { Name = "HumanoidRootPart", CFrame = parked, Parent = rig })
+	rig.PrimaryPart = root
+	Instance.new("Humanoid", { Name = "Humanoid", Parent = rig })
+	Instance.new("Part", { Name = "Slash", CFrame = parked * slashLocal, Parent = rig })
+
+	local save = value("StringValue", "Iron Clash", mockJson({
+		Information = { Length = 300, FPS = 60, Modified = 1 },
+		Items = {
+			{ Path = { InstanceNames = { "game", "Workspace", "Ripper" }, InstanceTypes = { "DataModel", "Workspace", "Model" }, ItemType = "Rig" } },
+			{ Path = { InstanceNames = { "game", "Workspace", "Ripper", "Slash" }, InstanceTypes = { "DataModel", "Workspace", "Model", "Part" }, ItemType = "BasePart" } },
+		},
+	}), saves)
+	local rigTrack = folder("CFrame", folder("1", save))
+	keyframe(rigTrack, 0, { start })
+	keyframe(rigTrack, 4, { lunge })
+	local events = folder("MarkerTrack", folder("2", save))
+	marker(events, 10, "")
+	marker(events, 100, "Second")
+
+	local result = Exporter.collect(SaveReader.load(save), { EffectName = "Event", FrameRate = 60 })
+	rig.Parent = nil
+	save.Parent = nil
+	return result, slashLocal
+end
+
+for _, parkedAfterLunge in { false, true } do
+	local result, slashLocal = ironClash(parkedAfterLunge)
+	local where = if parkedAfterLunge then "after the lunge" else "at frame 0"
+	check(`Iron Clash offsets are right with the playhead {where}`,
+		cfNear(result.Cues[1].Offset, slashLocal) and cfNear(result.Cues[2].Offset, slashLocal),
+		tostring(result.Cues[1].Offset))
+	check(`Iron Clash cues have no Parent ({where})`, result.Cues[1].Parent == nil)
+end
+
+-- Rig posing: joints and welds ------------------------------------------------------------------
+
+local RigPose = __load("RigPose")
+
+do
+	local workspace = game:GetService("Workspace")
+	local rig = Instance.new("Model", { Name = "R6", Parent = workspace })
+	local rootCF = CFrame.new(10, 3, 0) * CFrame.Angles(0, math.pi / 2, 0)
+	local root = Instance.new("Part", { Name = "HumanoidRootPart", CFrame = rootCF, Parent = rig })
+	rig.PrimaryPart = root
+	Instance.new("Humanoid", { Name = "Humanoid", Parent = rig })
+	local torso = Instance.new("Part", { Name = "Torso", Parent = rig })
+	local arm = Instance.new("Part", { Name = "Right Arm", Parent = rig })
+	local sword = Instance.new("Part", { Name = "Sword", Anchored = false, Parent = rig })
+
+	local rootC0 = CFrame.Angles(-math.pi / 2, 0, math.pi)
+	Instance.new("Motor6D", { Name = "RootJoint", Part0 = root, Part1 = torso, C0 = rootC0, C1 = rootC0, Parent = root })
+	local shoulderC0 = CFrame.new(1, 0.5, 0) * CFrame.Angles(0, math.pi / 2, 0)
+	local restC1 = CFrame.new(-0.5, 0.5, 0) * CFrame.Angles(0, math.pi / 2, 0)
+	Instance.new("Motor6D", { Name = "Right Shoulder", Part0 = torso, Part1 = arm, C0 = shoulderC0, C1 = restC1, Parent = torso })
+
+	-- The live scene, posed at rest (where the playhead happened to be).
+	torso.CFrame = rootCF * rootC0 * rootC0:Inverse()
+	arm.CFrame = torso.CFrame * shoulderC0 * restC1:Inverse()
+	local swordLocal = CFrame.new(0, -1, -2)
+	sword.CFrame = arm.CFrame * swordLocal
+	Instance.new("WeldConstraint", { Part0 = arm, Part1 = sword, Parent = sword })
+
+	local raised = CFrame.new(-0.5, 0.5, 0) * CFrame.Angles(math.pi / 2, math.pi / 2, 0)
+	local joints = {
+		{ Hier = { "Torso", "Right Arm" }, Track = { { Time = 0, Value = restC1 }, { Time = 10, Value = raised } } },
+	}
+
+	local pose = RigPose.new(rig, root, nil, joints)
+	local expectedArm = rootCF * rootC0 * rootC0:Inverse() * shoulderC0 * raised:Inverse()
+	check("poses a limb from its joint keys (C1)", cfNear(pose:CFrameAt(arm, 10), expectedArm))
+	check("a welded part follows its limb", cfNear(pose:CFrameAt(sword, 10), expectedArm * swordLocal))
+	check("knows what a welded part hangs off", pose:AttachedTo(sword) == arm)
+	check("an unkeyed joint stays at rest", cfNear(pose:CFrameAt(torso, 10), torso.CFrame))
+
+	-- Through the exporter: an event on the sword gets Parent = "Right Arm".
+	local save = value("StringValue", "Swing", mockJson({
+		Information = { Length = 60, FPS = 60, Modified = 1 },
+		Items = {
+			{ Path = { InstanceNames = { "game", "Workspace", "R6" }, InstanceTypes = { "DataModel", "Workspace", "Model" }, ItemType = "Rig" } },
+			{ Path = { InstanceNames = { "game", "Workspace", "R6", "Sword" }, InstanceTypes = { "DataModel", "Workspace", "Model", "Part" }, ItemType = "BasePart" } },
+		},
+	}), saves)
+	local jointFolder = folder("_joint", folder("Rig", folder("1", save)))
+	value("StringValue", "_hier", "Torso.Right Arm", jointFolder)
+	value("CFrameValue", "default", restC1, jointFolder)
+	local keyframes = folder("_keyframes", jointFolder)
+	keyframe(keyframes, 0, { restC1 })
+	keyframe(keyframes, 10, { raised })
+
+	local swordEvents = folder("MarkerTrack", folder("2", save))
+	marker(swordEvents, 10, "Shine")
+
+	-- A second event that names its own Parent in Moon's Events tab.
+	local named = folder("20", swordEvents)
+	value("StringValue", "codeBegin", "", named)
+	value("IntValue", "width", 0, named)
+	local kf = folder("KFMarkers", named)
+	local entry = value("StringValue", "1", "Parent", kf)
+	value("StringValue", "Val", "Torso", entry)
+
+	local bad = folder("30", swordEvents)
+	value("IntValue", "width", 0, bad)
+	local badEntry = value("StringValue", "1", "Parent", folder("KFMarkers", bad))
+	value("StringValue", "Val", "Left Wing", badEntry)
+
+	local loaded = SaveReader.load(save)
+	check("reads rig joints", #loaded.Items[1].Joints == 1 and loaded.Items[1].Joints[1].Hier[2] == "Right Arm")
+	check("reads event keys", loaded.Items[2].Markers[2].Keys.Parent == "Torso")
+
+	local result = Exporter.collect(loaded, { EffectName = "Event", FrameRate = 60 })
+	local shineCue, namedCue, badCue = result.Cues[1], result.Cues[2], result.Cues[3]
+	check("Parent comes from what the object is welded to", shineCue.Parent == "Right Arm", shineCue.Parent)
+	check("Offset is measured from the Parent", cfNear(shineCue.Offset, swordLocal), tostring(shineCue.Offset))
+	check("an event's Parent key wins", namedCue.Parent == "Torso", namedCue.Parent)
+	-- By frame 20 the arm is raised, and the sword with it.
+	check("explicit Parent offset is from that part", cfNear(namedCue.Offset, torso.CFrame:ToObjectSpace(expectedArm * swordLocal)))
+	check("an unknown Parent falls back to the root with a note", badCue.Parent == nil and badCue.Notes[1] ~= nil and string.find(badCue.Notes[1], "Left Wing", 1, true) ~= nil)
+
+	local withParent = Formatter.format({ TableName = "T", Lifetime = 1, CueTolerance = 0.1, Cues = { shineCue } })
+	check("writes the Parent field", string.find(withParent, 'Parent = "Right Arm",', 1, true) ~= nil, "\n" .. withParent)
+
+	rig.Parent = nil
+	save.Parent = nil
+end
+
+-- Two rigs, loose parts and nested attachments (shaped like the AeroFinisher save) -------------
+
+do
+	local workspace = game:GetService("Workspace")
+	local function makeRig(name: string, at: CFrame)
+		local model = Instance.new("Model", { Name = name, Parent = workspace })
+		local root = Instance.new("Part", { Name = "HumanoidRootPart", CFrame = at, Parent = model })
+		model.PrimaryPart = root
+		Instance.new("Humanoid", { Name = "Humanoid", Parent = model })
+		return model, root
+	end
+
+	local mainRig, mainRoot = makeRig("Main", CFrame.new(0, 3, 0))
+	local torso = Instance.new("Part", { Name = "Torso", CFrame = CFrame.new(0, 3, 0), Parent = mainRig })
+	Instance.new("Motor6D", { Part0 = mainRoot, Part1 = torso, C0 = CFrame.new(), C1 = CFrame.new(), Parent = mainRoot })
+	local victimRig, victimRoot = makeRig("Victim", CFrame.new(0, 3, -6))
+	local victimFx = Instance.new("Part", { Name = "VicFx", CFrame = victimRoot.CFrame * CFrame.new(0, 1, 0), Parent = victimRig })
+	local loose = Instance.new("Part", { Name = "Loose", Anchored = false, CFrame = CFrame.new(5, 0, 0), Parent = workspace })
+	local holder = Instance.new("Part", { Name = "Holder", CFrame = CFrame.new(0, 0, -2), Parent = workspace })
+	local outer = Instance.new("Attachment", { Name = "Outer", CFrame = CFrame.new(0, 1, 0), Parent = holder })
+	Instance.new("Attachment", { Name = "Inner", CFrame = CFrame.new(0, 0, -1), Parent = outer })
+
+	local function p(names: { string }, types: { string }, itemType: string)
+		local n, t = { "game", "Workspace" }, { "DataModel", "Workspace" }
+		for i, name in names do
+			table.insert(n, name)
+			table.insert(t, types[i])
+		end
+		return { Path = { InstanceNames = n, InstanceTypes = t, ItemType = itemType } }
+	end
+
+	local save = value("StringValue", "TwoRigs", mockJson({
+		Information = { Length = 60, FPS = 60, Modified = 1 },
+		Items = {
+			p({ "Main" }, { "Model" }, "Rig"),
+			p({ "Victim" }, { "Model" }, "Rig"),
+			p({ "Victim", "VicFx" }, { "Model", "Part" }, "BasePart"),
+			p({ "Loose" }, { "Part" }, "BasePart"),
+			p({ "Holder", "Outer", "Inner" }, { "Part", "Attachment", "Attachment" }, "Attachment"),
+			p({ "Main", "Torso" }, { "Model", "Part" }, "BasePart"),
+		},
+	}), saves)
+
+	-- The main rig's torso is animated through its joint.
+	local joint = folder("_joint", folder("Rig", folder("1", save)))
+	value("StringValue", "_hier", "Torso", joint)
+	keyframe(folder("_keyframes", joint), 0, { CFrame.new() })
+
+	for index = 3, 6 do
+		marker(folder("MarkerTrack", folder(tostring(index), save)), index * 10, "")
+	end
+
+	local result = Exporter.collect(SaveReader.load(save), { EffectName = "Event", FrameRate = 60 })
+	local byName = {}
+	for _, cue in result.Cues do
+		byName[cue.Effect] = cue
+	end
+
+	local vic = byName.VicFx
+	check("another rig's effect is placed from the main character", cfNear(vic.Offset, mainRoot.CFrame:ToObjectSpace(victimFx.CFrame)))
+	check("and says so", vic.Notes[1] ~= nil and string.find(vic.Notes[1], "Victim", 1, true) ~= nil and vic.Parent == nil, vic.Notes[1])
+
+	check("a loose unanchored part needs no note", #byName.Loose.Notes == 0, byName.Loose.Notes[1])
+
+	local inner = byName.Inner
+	check("a nested attachment is placed from the outer one", cfNear(inner.Offset, mainRoot.CFrame:ToObjectSpace(holder.CFrame * outer.CFrame * CFrame.new(0, 0, -1))), tostring(inner.Offset))
+	check("and notes it", inner.Notes[1] ~= nil and string.find(inner.Notes[1], "inside another attachment", 1, true) ~= nil)
+
+	local deep = Instance.new("Attachment", { Name = "Deep", Parent = Instance.new("Attachment", { Name = "Shell", Parent = torso }) })
+	check("a nested attachment hangs off the part it's on", RigPose.new(mainRig, mainRoot):AttachedTo(deep) == torso)
+
+	local torsoCue = byName.Torso
+	check("an effect on an animated body part is parented to that part", torsoCue.Parent == "Torso" and cfNear(torsoCue.Offset, CFrame.new()), torsoCue.Parent)
+
+	mainRig.Parent, victimRig.Parent, loose.Parent, holder.Parent, save.Parent = nil, nil, nil, nil, nil
+end
+
+-- Autosaves ------------------------------------------------------------------------------------
+
+do
+	local autosaves = folder("Autosaves", saves)
+	value("StringValue", "Ripper TestAutosave 04-10-2026", mockJson({ Information = { Length = 1, Modified = 9e9 }, Items = {} }), folder("Ripper Test", autosaves))
+	local names = {}
+	for _, entry in SaveReader.findSaves() do
+		table.insert(names, entry.Name)
+	end
+	check("Moon's autosaves aren't listed", not string.find(table.concat(names, ","), "Autosave", 1, true), table.concat(names, ","))
+	autosaves.Parent = nil
+end
 
 -- Export frame rate --------------------------------------------------------------------------
 
@@ -651,6 +895,7 @@ do
 			{ Frame = 0, Effect = "Start", Asset = "ImpactAnti", Offset = CFrame.new(0, 0, -2) },
 			{ Frame = 30, Effect = "Dust", Asset = "Dust", Offset = CFrame.new(1, 0, 0) },
 			{ Frame = 45, Effect = "Gone", Offset = CFrame.new() },
+			{ Frame = 50, Effect = "ArmGlow", Asset = "Dust", Parent = "Right Arm", Offset = CFrame.new(0, -1, 0) },
 		},
 	})
 
@@ -676,12 +921,15 @@ do
 		task = task,
 		warn = warn,
 		CFrame = CFrame,
+		Instance = Instance,
 	}, { __index = getfenv(0) }))
 	local Ripper = chunk()
 
 	local character = Instance.new("Model", { Name = "Character" })
 	local rootCFrame = CFrame.new(5, 0, 0) * CFrame.Angles(0, math.pi / 2, 0)
 	Instance.new("Part", { Name = "HumanoidRootPart", CFrame = rootCFrame, Parent = character })
+	local armCFrame = rootCFrame * CFrame.new(1.5, 0, 0)
+	local rightArm = Instance.new("Part", { Name = "Right Arm", CFrame = armCFrame, Parent = character })
 	local track = newTrack()
 
 	table.clear(calls)
@@ -701,6 +949,17 @@ do
 
 	at(track, 46)
 	check("warns about a cue with no VFX object", warnings[1] and string.find(warnings[1], 'No VFX named "Gone"', 1, true) ~= nil, warnings[1])
+	table.clear(warnings)
+	at(track, 51)
+	local glow
+	for _, child in game:GetService("Workspace"):GetChildren() do
+		if child.Name == "Dust" and child.CFrame and cfNear(child.CFrame, armCFrame * CFrame.new(0, -1, 0)) then
+			glow = child
+		end
+	end
+	check("a cue with a Parent spawns at that part", glow ~= nil)
+	local weld = glow and glow:FindFirstChild("WeldConstraint")
+	check("and is welded to it", weld ~= nil and weld.Part0 == rightArm and weld.Part1 == glow and glow.Anchored == false, weld)
 	check("sequence finishes", not seq.Active)
 
 	local runtimeNamed = Formatter.format({ TableName = "Sequence", Lifetime = 1, CueTolerance = 0.1, Runtime = true, Cues = {} })
