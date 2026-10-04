@@ -26,7 +26,7 @@ export type Spec = {
 	FPS: number?,
 	-- Add the functions that play the cues.
 	Runtime: boolean?,
-	Cues: { { Frame: number, Effect: string, Offset: CFrame, Notes: { string }?, Asset: string? } },
+	Cues: { { Frame: number, Effect: string, Offset: CFrame, Notes: { string }?, Asset: string?, Parent: string? } },
 }
 
 local KEYWORDS = {}
@@ -79,8 +79,10 @@ function NAME.Emit(object: Instance)
 	end
 end
 
--- Spawns one cue's VFX relative to the HumanoidRootPart; it's removed after Lifetime seconds.
-function NAME.Spawn(root: BasePart, cue)
+-- Spawns one cue's VFX and removes it after Lifetime seconds. It's placed at Offset from the
+-- HumanoidRootPart, or, for a cue with a Parent, from that part of the character, and welded to
+-- it so it follows the part.
+function NAME.Spawn(character: Model, root: BasePart, cue)
 	local name = cue.Object or cue.Effect
 	local template = VFX:FindFirstChild(name)
 	if not template then
@@ -88,15 +90,40 @@ function NAME.Spawn(root: BasePart, cue)
 		return nil
 	end
 
+	local anchor = root
+	if cue.Parent then
+		local part = character:FindFirstChild(cue.Parent, true)
+		if part and part:IsA("BasePart") then
+			anchor = part
+		else
+			warn(`[NAME] {character:GetFullName()} has no part named "{cue.Parent}"; using the HumanoidRootPart`)
+		end
+	end
+
 	local effect = template:Clone()
-	local cframe = root.CFrame * cue.Offset
+	local cframe = anchor.CFrame * cue.Offset
 	if effect:IsA("Model") then
 		effect:PivotTo(cframe)
 	elseif effect:IsA("BasePart") then
 		effect.CFrame = cframe
 	end
-
 	effect.Parent = workspace
+
+	if anchor ~= root then
+		local parts = effect:GetDescendants()
+		table.insert(parts, effect)
+		for _, part in parts do
+			if part:IsA("BasePart") then
+				local weld = Instance.new("WeldConstraint")
+				weld.Part0 = anchor
+				weld.Part1 = part
+				weld.Parent = part
+				part.Anchored = false
+				part.Massless = true
+			end
+		end
+	end
+
 	NAME.Emit(effect)
 	Debris:AddItem(effect, NAME.Lifetime)
 	return effect
@@ -114,7 +141,7 @@ function NAME.Play(character: Model, track: AnimationTrack)
 	local steps = {}
 	for key, cue in NAME.Cues do
 		steps[key] = function()
-			NAME.Spawn(root, cue)
+			NAME.Spawn(character, root, cue)
 		end
 	end
 
@@ -218,6 +245,9 @@ function Formatter.format(spec: Spec): string
 			fields[i] = string.format("Effect = %q,", cue.Effect)
 			if cue.Asset and cue.Asset ~= cue.Effect then
 				fields[i] ..= string.format(" Object = %q,", cue.Asset)
+			end
+			if cue.Parent then
+				fields[i] ..= string.format(" Parent = %q,", cue.Parent)
 			end
 
 			keyWidth = math.max(keyWidth, #keys[i])

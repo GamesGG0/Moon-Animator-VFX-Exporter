@@ -13,6 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODULES = {
     "Easing": "Easing.lua",
     "Sampler": "Sampler.lua",
+    "RigPose": "RigPose.lua",
     "SaveReader": "SaveReader.lua",
     "Exporter": "Exporter.lua",
     "Formatter": "Formatter.lua",

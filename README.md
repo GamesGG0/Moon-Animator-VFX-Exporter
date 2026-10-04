@@ -21,7 +21,8 @@ local MoonAnimation = {
 
 ## Features
 
-- Finds every event in a Moon Animator 2 file and calculates each effect's offset from the HumanoidRootPart, straight from the keyframes (easing included).
+- Finds every event in a Moon Animator 2 file and calculates each effect's offset from the HumanoidRootPart, straight from the keyframes (easing, rig joints and rig movement included), so it doesn't matter where Moon's playhead was left.
+- Effects connected to a body part get a `Parent`, such as `Parent = "Right Arm"`. They spawn at that part and are welded to it. It's set automatically for effects attached or welded to a limb, or you can add a `Parent` key in Moon's Edit Events → **Events** tab.
 - Exports a self-contained ModuleScript with `Play(character, track)`, a `Sequence` module that keeps the VFX in time with the animation, and a `VFX` folder holding copies of the effect objects.
 - **Save .rbxm** saves that module as one file you can drop into any place.
 - Adds an **Export VFX** button next to Moon Animator's Options button.

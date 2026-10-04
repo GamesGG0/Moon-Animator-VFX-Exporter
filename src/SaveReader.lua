@@ -21,6 +21,16 @@ export type Marker = {
 	Name: string,
 	Width: number,
 	Code: { string },
+	-- Key/value pairs from the event's "Events" tab, e.g. Parent = "Right Arm".
+	Keys: { [string]: string },
+}
+
+-- A rig joint's keyframes. Hier is the chain of parts from the root, e.g. "Torso.Right Arm";
+-- the keyed values are the joint's C1.
+export type Joint = {
+	Hier: { string },
+	Default: CFrame?,
+	Track: { Keyframe },
 }
 
 export type Item = {
@@ -31,6 +41,7 @@ export type Item = {
 	Instance: Instance?,
 	Tracks: { [string]: { Keyframe } },
 	Markers: { Marker },
+	Joints: { Joint },
 }
 
 export type SaveEntry = {
@@ -222,6 +233,44 @@ local function collectCode(marker: Instance): { string }
 	return code
 end
 
+-- The "Events" tab of Moon's Edit Events window: KFMarkers/<n> holds a key, its Val child the value.
+local function readKeys(marker: Instance): { [string]: string }
+	local keys = {}
+	local bin = findChildNoCase(marker, "KFMarkers")
+	if bin then
+		for _, entry in bin:GetChildren() do
+			local val = entry:FindFirstChild("Val")
+			if entry:IsA("ValueBase") and val and val:IsA("ValueBase") then
+				local key = tostring((entry :: any).Value)
+				if key ~= "" then
+					keys[key] = tostring((val :: any).Value)
+				end
+			end
+		end
+	end
+	return keys
+end
+
+-- A rig's joints: Rig/_joint/{_hier, default, _keyframes}.
+function SaveReader.readJoints(rigFolder: Instance): { Joint }
+	local joints = {}
+	for _, jointInst in rigFolder:GetChildren() do
+		local hier = jointInst:FindFirstChild("_hier")
+		local keyframes = jointInst:FindFirstChild("_keyframes")
+		if not (hier and hier:IsA("StringValue") and keyframes) then
+			continue
+		end
+
+		local default = jointInst:FindFirstChild("default")
+		table.insert(joints, {
+			Hier = string.split((hier :: StringValue).Value, "."),
+			Default = if default and default:IsA("CFrameValue") then (default :: CFrameValue).Value else nil,
+			Track = SaveReader.readTrack(keyframes),
+		})
+	end
+	return joints
+end
+
 function SaveReader.readMarkers(folder: Instance): { Marker }
 	local markers = {}
 
@@ -237,6 +286,7 @@ function SaveReader.readMarkers(folder: Instance): { Marker }
 			Name = if type(name) == "string" then name else "",
 			Width = tonumber(readField(markerInst, "width")) or 0,
 			Code = collectCode(markerInst),
+			Keys = readKeys(markerInst),
 		})
 	end
 
@@ -320,7 +370,8 @@ local function decodeSave(save: Instance): any
 	return nil
 end
 
--- Lists every Moon Animator 2 save in the place, most recently modified first.
+-- Lists every Moon Animator 2 save in the place, most recently modified first. Moon's own
+-- autosaves (MoonAnimator2Saves.Autosaves) are left out.
 function SaveReader.findSaves(): { SaveEntry }
 	local ServerStorage = game:GetService("ServerStorage")
 	local root = ServerStorage:FindFirstChild(SAVE_FOLDER)
@@ -328,6 +379,9 @@ function SaveReader.findSaves(): { SaveEntry }
 
 	local saves = {}
 	for _, inst in candidates do
+		if inst:FindFirstAncestor("Autosaves") then
+			continue
+		end
 		local data = decodeSave(inst)
 		if data then
 			table.insert(saves, entryFromData(inst :: StringValue, data))
@@ -365,13 +419,14 @@ function SaveReader.load(save: StringValue): Animation
 			Instance = SaveReader.resolvePath(path),
 			Tracks = {},
 			Markers = {},
+			Joints = {},
 		}
 
 		local folder = save:FindFirstChild(tostring(index))
 		if folder then
 			for _, child in folder:GetChildren() do
 				if child.Name == "Rig" then
-					continue -- joint keyframes for rigs; not needed for offsets
+					item.Joints = SaveReader.readJoints(child)
 				elseif isMarkerTrack(child) then
 					for _, marker in SaveReader.readMarkers(child) do
 						table.insert(item.Markers, marker)
