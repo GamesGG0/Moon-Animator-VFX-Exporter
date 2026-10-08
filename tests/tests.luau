@@ -533,6 +533,13 @@ do
 	local entry = value("StringValue", "1", "Parent", kf)
 	value("StringValue", "Val", "Torso", entry)
 
+	-- An event whose Parent is an attachment on the arm.
+	local grip = Instance.new("Attachment", { Name = "RightGripAttachment", CFrame = CFrame.new(0, -1, 0), Parent = arm })
+	local gripped = folder("40", swordEvents)
+	value("IntValue", "width", 0, gripped)
+	local gripEntry = value("StringValue", "1", "Parent", folder("KFMarkers", gripped))
+	value("StringValue", "Val", "RightGripAttachment", gripEntry)
+
 	local bad = folder("30", swordEvents)
 	value("IntValue", "width", 0, bad)
 	local badEntry = value("StringValue", "1", "Parent", folder("KFMarkers", bad))
@@ -550,6 +557,10 @@ do
 	-- By frame 20 the arm is raised, and the sword with it.
 	check("explicit Parent offset is from that part", cfNear(namedCue.Offset, torso.CFrame:ToObjectSpace(expectedArm * swordLocal)))
 	check("an unknown Parent falls back to the root with a note", badCue.Parent == nil and badCue.Notes[1] ~= nil and string.find(badCue.Notes[1], "Left Wing", 1, true) ~= nil)
+
+	local gripCue = result.Cues[4]
+	check("Parent can name an attachment", gripCue.Parent == "RightGripAttachment", gripCue.Parent)
+	check("and the offset is from the attachment", cfNear(gripCue.Offset, grip.CFrame:Inverse() * swordLocal), tostring(gripCue.Offset))
 
 	local withParent = Formatter.format({ TableName = "T", Lifetime = 1, CueTolerance = 0.1, Cues = { shineCue } })
 	check("writes the Parent field", string.find(withParent, 'Parent = "Right Arm",', 1, true) ~= nil, "\n" .. withParent)
@@ -633,6 +644,123 @@ do
 	check("an effect on an animated body part is parented to that part", torsoCue.Parent == "Torso" and cfNear(torsoCue.Offset, CFrame.new()), torsoCue.Parent)
 
 	mainRig.Parent, victimRig.Parent, loose.Parent, holder.Parent, save.Parent = nil, nil, nil, nil, nil
+end
+
+-- Cue Functions kept across exports -------------------------------------------------------------
+
+local Carryover = __load("Carryover")
+
+do
+	local old = table.concat({
+		"local Thing = {",
+		"\tLifetime = 1,",
+		"\tCues = {",
+		'\t\t[0] =  { Effect = "Start", Offset = CFrame.new(), Function = function(effect, character)',
+		"\t\t\tlocal a, b = 1, { 2, 3 } -- a comment with end and }",
+		'\t\t\tif a then print("}, end") end',
+		"\t\t\tlocal c = if b then 1 else 2",
+		"\t\t\tfor i = 1, 2 do a += i end",
+		"\t\t\trepeat a -= 1 until a < 0",
+		"\t\tend },",
+		'\t\t[27] = { Effect = "Hit", Offset = CFrame.new(1, 2, 3), Function = Helpers.shake, },',
+		'\t\t[51] = { Effect = "Gone", Offset = CFrame.new() , Function = function() return [[ x ]] end },',
+		'\t\t[60] = { Effect = "Plain", Offset = CFrame.new() },',
+		"\t},",
+		"}",
+	}, "\n")
+
+	local found = Carryover.extract(old)
+	check("finds each cue Function", #found == 3, #found)
+	check("keeps a multi-line function whole", string.sub(found[1].Text, 1, 8) == "function" and string.sub(found[1].Text, -3) == "end", found[1].Text)
+	check("keeps a reference to a function", found[2].Text == "Helpers.shake", found[2].Text)
+	check("reads keys and effects", found[1].Key == "0" and found[2].Effect == '"Hit"')
+
+	-- The next export: Start moved to frame 2, Hit stayed at 27, Gone was deleted in Moon.
+	local cues = {
+		{ Frame = 2, Effect = "Start", Offset = CFrame.new() },
+		{ Frame = 27, Effect = "Hit", Offset = CFrame.new() },
+		{ Frame = 60, Effect = "Plain", Offset = CFrame.new() },
+	}
+	local orphans = Carryover.apply(found, cues, function(cue)
+		return tostring(cue.Frame)
+	end)
+	check("matched by key", cues[2].Function == "Helpers.shake")
+	check("matched by effect name when its frame moved", cues[1].Function == found[1].Text)
+	check("a Function whose cue is gone is set aside", #orphans == 1 and orphans[1].Key == "51" and cues[3].Function == nil)
+
+	local source = Formatter.format({ TableName = "Thing", Lifetime = 1, CueTolerance = 0.1, Runtime = true, FPS = 60, Cues = cues, Orphans = orphans })
+	local chunk, compileError = loadstring(source)
+	check("an export with Functions compiles", chunk ~= nil, compileError)
+	check("set-aside Functions are in a comment", string.find(source, Carryover.ORPHAN_MARKER, 1, true) ~= nil and string.find(source, "--[=[", 1, true) ~= nil)
+	check("Functions survive the export after that too", #Carryover.extract(source) == 3, #Carryover.extract(source))
+	check("an export with no Functions finds none", #Carryover.extract(Formatter.format({ TableName = "T", Lifetime = 1, CueTolerance = 0.1, Runtime = true, Cues = {} })) == 0)
+end
+
+-- Function, attachment Parents and attachment VFX at runtime ------------------------------------
+
+do
+	local vfx = Instance.new("Folder", { Name = "VFX" })
+	Instance.new("Part", { Name = "Dust", Parent = vfx })
+	Instance.new("Attachment", { Name = "Spark", Parent = vfx })
+
+	local source = Formatter.format({
+		TableName = "Fx",
+		Lifetime = 1,
+		CueTolerance = 0.1,
+		Runtime = true,
+		FPS = 60,
+		Cues = {
+			{ Frame = 0, Effect = "Dust", Offset = CFrame.new(0, 0, -1), Function = "function(effect, character, cue) record(effect, character, cue) end" },
+			{ Frame = 1, Effect = "CodeOnly", Offset = CFrame.new(), Function = "function(effect, character, cue) record(effect, character, cue) end" },
+			{ Frame = 2, Effect = "Grip", Asset = "Dust", Parent = "RightGripAttachment", Offset = CFrame.new(0, 0, -2) },
+			{ Frame = 3, Effect = "Spark", Offset = CFrame.new(0, 2, 0) },
+		},
+	})
+
+	local recorded = {}
+	local chunk = loadstring(source)
+	setfenv(chunk, setmetatable({
+		script = { Sequence = {}, VFX = vfx },
+		require = function()
+			return Sequence
+		end,
+		game = game,
+		workspace = game:GetService("Workspace"),
+		task = task,
+		warn = warn,
+		CFrame = CFrame,
+		Instance = Instance,
+		record = function(...)
+			table.insert(recorded, { ... })
+		end,
+	}, { __index = getfenv(0) }))
+	local Fx = chunk()
+
+	local character = Instance.new("Model", { Name = "Character" })
+	local root = Instance.new("Part", { Name = "HumanoidRootPart", CFrame = CFrame.new(0, 3, 0), Parent = character })
+	local arm = Instance.new("Part", { Name = "Right Arm", CFrame = CFrame.new(1.5, 3, 0), Parent = character })
+	local grip = Instance.new("Attachment", { Name = "RightGripAttachment", CFrame = CFrame.new(0, -1, 0), Parent = arm })
+
+	table.clear(warnings)
+	local dust = Fx.Spawn(character, root, Fx.Cues[0])
+	check("Function runs after the VFX spawns", recorded[1] and recorded[1][1] == dust and recorded[1][2] == character and recorded[1][3] == Fx.Cues[0])
+
+	local none = Fx.Spawn(character, root, Fx.Cues[1])
+	check("a code-only cue runs its Function with no effect and no warning", none == nil and recorded[2] and recorded[2][1] == nil and #warnings == 0, warnings[1])
+
+	local gripped = Fx.Spawn(character, root, Fx.Cues[2])
+	check("Parent can be an attachment", gripped and cfNear(gripped.CFrame, arm.CFrame * grip.CFrame * CFrame.new(0, 0, -2)))
+	local weld = gripped and gripped:FindFirstChild("WeldConstraint")
+	check("and follows the part it's on", weld ~= nil and weld.Part0 == arm)
+
+	local spark = Fx.Spawn(character, root, Fx.Cues[3])
+	check("an attachment VFX goes on a part", spark and spark.Parent == root and cfNear(spark.WorldCFrame, root.CFrame * CFrame.new(0, 2, 0)))
+
+	for _, child in game:GetService("Workspace"):GetChildren() do
+		if child.Name == "Dust" then
+			child.Parent = nil
+		end
+	end
 end
 
 -- Autosaves ------------------------------------------------------------------------------------

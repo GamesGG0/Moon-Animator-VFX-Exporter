@@ -292,6 +292,9 @@ InstanceMT.__index = function(inst, key)
 	if EVENTS[key] then
 		data[key] = newSignal()
 		return data[key]
+	elseif key == "WorldCFrame" and data.ClassName == "Attachment" then
+		local parent = data.Parent
+		return if parent and parent.CFrame then parent.CFrame * data.CFrame else data.CFrame
 	elseif key == "AbsoluteSize" or key == "AbsolutePosition" then
 		return { X = 0, Y = 0 }
 	end
@@ -313,6 +316,9 @@ InstanceMT.__newindex = function(inst, key, value)
 		if value then
 			table.insert(rawget(value, "__data").Children, inst)
 		end
+	elseif key == "WorldCFrame" and data.ClassName == "Attachment" then
+		local parent = data.Parent
+		data.CFrame = if parent and parent.CFrame then parent.CFrame:Inverse() * value else value
 	elseif data[key] ~= value then
 		data[key] = value
 		local changed = data["__changed_" .. key]

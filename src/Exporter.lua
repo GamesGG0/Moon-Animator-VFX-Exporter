@@ -33,9 +33,11 @@ export type Cue = {
 	-- The VFX object this cue spawns, and its name in the exported VFX folder.
 	Object: Instance?,
 	Asset: string?,
-	-- The character part the effect is connected to (the Offset is from it), or nil for the
-	-- HumanoidRootPart.
+	-- The character part or attachment the effect is connected to (the Offset is from it), or nil
+	-- for the HumanoidRootPart.
 	Parent: string?,
+	-- Source of the cue's Function, carried over from the last export (see Carryover).
+	Function: string?,
 }
 
 export type Result = {
@@ -387,7 +389,7 @@ end
 -- Set by a "Parent" key in the event's Events tab, or worked out from the VFX object:
 --   a part Moon animates through a joint (a limb, an animated weapon)  -> that part itself
 --   an attachment, or a part jointed or welded to the rig              -> the part it hangs off
-local function parentFor(ctx: Context, marker: SaveReader.Marker, object: Instance): (BasePart?, string?)
+local function parentFor(ctx: Context, marker: SaveReader.Marker, object: Instance): (Instance?, string?)
 	local main = ctx.MainPose
 
 	local explicit: string? = nil
@@ -401,11 +403,12 @@ local function parentFor(ctx: Context, marker: SaveReader.Marker, object: Instan
 		if explicit == "" or not main or explicit == main.Root.Name then
 			return nil, nil
 		end
+		-- A body part, or an attachment on one (e.g. RightGripAttachment).
 		local part = main.Rig:FindFirstChild(explicit, true)
-		if part and part:IsA("BasePart") then
+		if part and (part:IsA("BasePart") or (part:IsA("Attachment") and part.Parent and part.Parent:IsA("BasePart"))) then
 			return part, nil
 		end
-		return nil, `Parent "{explicit}" isn't a part of {main.Rig.Name}, so this is measured from the HumanoidRootPart`
+		return nil, `Parent "{explicit}" isn't a part or attachment of {main.Rig.Name}, so this is measured from the HumanoidRootPart`
 	end
 
 	local pose = poseOf(ctx, object)
@@ -560,10 +563,10 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 			end
 
 			local offset = CFrame.new()
-			local parentPart: BasePart? = nil
+			local parentInst: Instance? = nil
 			if target then
 				local parentNote
-				parentPart, parentNote = parentFor(ctx, marker, object or target)
+				parentInst, parentNote = parentFor(ctx, marker, object or target)
 				if parentNote then
 					table.insert(notes, parentNote)
 				end
@@ -573,7 +576,7 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 					table.insert(notes, `on {otherRig.Rig.Name}, not {ctx.MainPose.Rig.Name}; placed relative to {ctx.MainPose.Rig.Name}`)
 				end
 
-				local origin = parentPart or originFor(ctx, target)
+				local origin: Instance? = parentInst or originFor(ctx, target)
 				local targetCFrame, cfNote = cframeAt(ctx, target, marker.Frame)
 
 				if not origin then
@@ -581,7 +584,11 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 				elseif not targetCFrame then
 					table.insert(notes, `can't get a CFrame from {target.ClassName} {target.Name}`)
 				else
-					offset = originAt(ctx, origin, marker.Frame):ToObjectSpace(targetCFrame)
+					-- An attachment Parent is measured from its world CFrame at the frame.
+					local originCFrame = if origin:IsA("BasePart")
+						then originAt(ctx, origin, marker.Frame)
+						else cframeAt(ctx, origin, marker.Frame)
+					offset = (originCFrame or CFrame.new()):ToObjectSpace(targetCFrame)
 					if cfNote then
 						table.insert(notes, cfNote)
 					end
@@ -601,7 +608,7 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 				Offset = offset,
 				Notes = notes,
 				Object = object,
-				Parent = if parentPart then parentPart.Name else nil,
+				Parent = if parentInst then parentInst.Name else nil,
 			})
 		end
 	end
