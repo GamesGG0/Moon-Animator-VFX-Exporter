@@ -17,6 +17,7 @@ MODULES = {
     "SaveReader": "SaveReader.lua",
     "Exporter": "Exporter.lua",
     "Formatter": "Formatter.lua",
+    "Carryover": "Carryover.lua",
     "MoonHook": "MoonHook.lua",
     "Packager": "Packager.lua",
     "Sequence": "Templates/Sequence.luau",

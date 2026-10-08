@@ -11,6 +11,7 @@ local ScriptEditorService = game:GetService("ScriptEditorService")
 local Selection = game:GetService("Selection")
 local ServerStorage = game:GetService("ServerStorage")
 
+local Carryover = require(script.Carryover)
 local Exporter = require(script.Exporter)
 local Formatter = require(script.Formatter)
 local MoonHook = require(script.MoonHook)
@@ -249,6 +250,27 @@ local function export(openScript: boolean): ModuleScript?
 	local tolerance = tonumber(ui.CueTolerance.Text) or DEFAULT_TOLERANCE
 
 	local timestamps = state.KeyFormat == "Time"
+
+	-- Keep the Functions added to the last export of this file.
+	local kept, orphans = 0, {}
+	local exportFolder = ServerStorage:FindFirstChild(EXPORT_FOLDER)
+	local previous = exportFolder and exportFolder:FindFirstChild(entry.Name)
+	if previous and previous:IsA("ModuleScript") then
+		local okSource, oldSource = pcall(function()
+			return ScriptEditorService:GetEditorSource(previous)
+		end)
+		if not okSource or type(oldSource) ~= "string" then
+			oldSource = previous.Source
+		end
+
+		local okFound, found = pcall(Carryover.extract, oldSource)
+		if okFound then
+			orphans = Carryover.apply(found, result.Cues, function(cue)
+				return Formatter.key(cue.Frame, timestamps, result.FrameRate)
+			end)
+			kept = #found - #orphans
+		end
+	end
 	local rate = result.FrameRate
 	local keyKind = if timestamps then "times in seconds" else `frames at {rate} fps`
 	if result.FrameRateReason and not timestamps then
@@ -263,6 +285,7 @@ local function export(openScript: boolean): ModuleScript?
 		FPS = rate,
 		Runtime = true,
 		Cues = result.Cues,
+		Orphans = orphans,
 	})
 
 	local module, packed = writeModule(entry.Name, source, result.Cues)
@@ -273,12 +296,18 @@ local function export(openScript: boolean): ModuleScript?
 		if #cue.Notes > 0 then
 			flagged += 1
 		end
-		if not cue.Object then
+		if not cue.Object and not cue.Function then
 			objectless += 1
 		end
 	end
 
 	local message = `Exported {#result.Cues} cues and {packed} VFX objects to {module:GetFullName()}.`
+	if kept > 0 then
+		message ..= ` Kept {kept} cue Function{if kept == 1 then "" else "s"} from the last export.`
+	end
+	if #orphans > 0 then
+		message ..= ` {#orphans} Function{if #orphans == 1 then "'s cue is" else "s' cues are"} gone; kept in a comment at the end of the module.`
+	end
 	if result.FrameRateReason and not timestamps then
 		message ..= ` Cue keys are at {rate} fps ({result.FrameRateReason}).`
 	end
@@ -291,7 +320,7 @@ local function export(openScript: boolean): ModuleScript?
 	if #result.Warnings > 0 then
 		message ..= "\n" .. table.concat(result.Warnings, "\n")
 	end
-	ui:SetStatus(message, if flagged > 0 or objectless > 0 or #result.Warnings > 0 then "warn" else "ok")
+	ui:SetStatus(message, if flagged > 0 or objectless > 0 or #orphans > 0 or #result.Warnings > 0 then "warn" else "ok")
 
 	print(`[Moon VFX Exporter] {message}`)
 	if openScript then

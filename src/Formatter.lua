@@ -26,7 +26,10 @@ export type Spec = {
 	FPS: number?,
 	-- Add the functions that play the cues.
 	Runtime: boolean?,
-	Cues: { { Frame: number, Effect: string, Offset: CFrame, Notes: { string }?, Asset: string?, Parent: string? } },
+	-- Function is the source text of a cue's Function, carried over from the last export.
+	Cues: { { Frame: number, Effect: string, Offset: CFrame, Notes: { string }?, Asset: string?, Parent: string?, Function: string? } },
+	-- Functions from the last export that no longer have a cue.
+	Orphans: { { Key: string, Text: string } }?,
 }
 
 local KEYWORDS = {}
@@ -79,53 +82,66 @@ function NAME.Emit(object: Instance)
 	end
 end
 
--- Spawns one cue's VFX and removes it after Lifetime seconds. It's placed at Offset from the
--- HumanoidRootPart, or, for a cue with a Parent, from that part of the character, and welded to
--- it so it follows the part.
+-- Spawns one cue's VFX and removes it after Lifetime seconds, then runs the cue's Function if it
+-- has one. The VFX is placed at Offset from the HumanoidRootPart, or, for a cue with a Parent,
+-- from that part or attachment of the character, and attached to it so it follows.
 function NAME.Spawn(character: Model, root: BasePart, cue)
+	local anchorCFrame, anchorPart, follow = root.CFrame, root, false
+	if cue.Parent then
+		local found = character:FindFirstChild(cue.Parent, true)
+		if found and found:IsA("BasePart") then
+			anchorCFrame, anchorPart, follow = found.CFrame, found, true
+		elseif found and found:IsA("Attachment") and found.Parent and found.Parent:IsA("BasePart") then
+			anchorCFrame, anchorPart, follow = found.WorldCFrame, found.Parent, true
+		else
+			warn(`[NAME] {character:GetFullName()} has no part or attachment named "{cue.Parent}"; using the HumanoidRootPart`)
+		end
+	end
+
+	local effect = nil
 	local name = cue.Object or cue.Effect
 	local template = VFX:FindFirstChild(name)
-	if not template then
-		warn(`[NAME] No VFX named "{name}" in {VFX:GetFullName()}`)
-		return nil
-	end
+	if template then
+		effect = template:Clone()
+		local cframe = anchorCFrame * cue.Offset
 
-	local anchor = root
-	if cue.Parent then
-		local part = character:FindFirstChild(cue.Parent, true)
-		if part and part:IsA("BasePart") then
-			anchor = part
+		if effect:IsA("Attachment") then
+			-- An attachment lives on a part, so it goes on the one it's measured from.
+			effect.Parent = anchorPart
+			effect.WorldCFrame = cframe
 		else
-			warn(`[NAME] {character:GetFullName()} has no part named "{cue.Parent}"; using the HumanoidRootPart`)
-		end
-	end
+			if effect:IsA("Model") then
+				effect:PivotTo(cframe)
+			elseif effect:IsA("BasePart") then
+				effect.CFrame = cframe
+			end
+			effect.Parent = workspace
 
-	local effect = template:Clone()
-	local cframe = anchor.CFrame * cue.Offset
-	if effect:IsA("Model") then
-		effect:PivotTo(cframe)
-	elseif effect:IsA("BasePart") then
-		effect.CFrame = cframe
-	end
-	effect.Parent = workspace
-
-	if anchor ~= root then
-		local parts = effect:GetDescendants()
-		table.insert(parts, effect)
-		for _, part in parts do
-			if part:IsA("BasePart") then
-				local weld = Instance.new("WeldConstraint")
-				weld.Part0 = anchor
-				weld.Part1 = part
-				weld.Parent = part
-				part.Anchored = false
-				part.Massless = true
+			if follow then
+				local parts = effect:GetDescendants()
+				table.insert(parts, effect)
+				for _, part in parts do
+					if part:IsA("BasePart") then
+						local weld = Instance.new("WeldConstraint")
+						weld.Part0 = anchorPart
+						weld.Part1 = part
+						weld.Parent = part
+						part.Anchored = false
+						part.Massless = true
+					end
+				end
 			end
 		end
+
+		NAME.Emit(effect)
+		Debris:AddItem(effect, NAME.Lifetime)
+	elseif not cue.Function then
+		warn(`[NAME] No VFX named "{name}" in {VFX:GetFullName()}`)
 	end
 
-	NAME.Emit(effect)
-	Debris:AddItem(effect, NAME.Lifetime)
+	if cue.Function then
+		cue.Function(effect, character, cue)
+	end
 	return effect
 end
 
@@ -185,6 +201,11 @@ function Formatter.seconds(frame: number, fps: number): string
 	return text
 end
 
+-- A cue's key as written: its frame, or its time in seconds.
+function Formatter.key(frame: number, timestamps: boolean?, fps: number?): string
+	return if timestamps then Formatter.seconds(frame, fps or 60) else tostring(frame)
+end
+
 -- "Ripper Test" -> "RipperTest", "2nd move" -> "_2ndmove", "end" -> "_end"
 function Formatter.identifier(name: string): string
 	local id = string.gsub(name, "[^%w_]", "")
@@ -216,6 +237,10 @@ function Formatter.format(spec: Spec): string
 		add("-- Usage:")
 		add("--   track:Play()")
 		add(`--   {name}.Play(character, track)`)
+		add("--")
+		add("-- Any cue can also take Function = function(effect, character, cue) ... end. It runs when")
+		add("-- the cue fires, right after its VFX spawns (effect is nil if the cue has none), and it's")
+		add("-- kept when the animation is exported again.")
 		add("")
 		for _, line in string.split(RUNTIME_HEADER, "\n") do
 			add(line)
@@ -238,8 +263,7 @@ function Formatter.format(spec: Spec): string
 		local keyWidth, fieldWidth = 0, 0
 
 		for i, cue in spec.Cues do
-			local key = if spec.Timestamps then Formatter.seconds(cue.Frame, spec.FPS or 60) else tostring(cue.Frame)
-			keys[i] = `[{key}] =`
+			keys[i] = `[{Formatter.key(cue.Frame, spec.Timestamps, spec.FPS)}] =`
 
 			-- Object is only written when the effect's name isn't already its VFX object's name.
 			fields[i] = string.format("Effect = %q,", cue.Effect)
@@ -258,7 +282,11 @@ function Formatter.format(spec: Spec): string
 		for i, cue in spec.Cues do
 			local key = keys[i] .. string.rep(" ", keyWidth - #keys[i] + 1)
 			local field = fields[i] .. string.rep(" ", fieldWidth - #fields[i] + 1)
-			local line = `\t\t{key}\{ {field}Offset = {Formatter.cframe(cue.Offset)} },`
+			local line = `\t\t{key}\{ {field}Offset = {Formatter.cframe(cue.Offset)}`
+			if cue.Function then
+				line ..= `, Function = {cue.Function}`
+			end
+			line ..= " },"
 
 			if cue.Notes and #cue.Notes > 0 then
 				line ..= " -- " .. table.concat(cue.Notes, "; ")
@@ -270,6 +298,27 @@ function Formatter.format(spec: Spec): string
 
 	add("}")
 	add("")
+
+	-- Functions from the last export whose cue is gone, kept so the code isn't lost.
+	if spec.Orphans and #spec.Orphans > 0 then
+		local body = {}
+		for _, orphan in spec.Orphans do
+			table.insert(body, `[{orphan.Key}] = \{ Function = {orphan.Text} },`)
+		end
+		local text = table.concat(body, "\n")
+		local level = ""
+		while string.find(text, "]" .. level .. "]", 1, true) do
+			level ..= "="
+		end
+		add("-- These Functions were on cues that are gone since the last export. Put them on a cue to use them.")
+		-- (Carryover.ORPHAN_MARKER matches the first sentence, so they survive the next export too.)
+		add(`--[{level}[`)
+		for _, line in string.split(text, "\n") do
+			add(line)
+		end
+		add(`]{level}]`)
+		add("")
+	end
 
 	if spec.Runtime then
 		for _, line in string.split((string.gsub(RUNTIME, "NAME", name)), "\n") do
