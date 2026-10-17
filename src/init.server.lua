@@ -10,6 +10,7 @@ local ChangeHistoryService = game:GetService("ChangeHistoryService")
 local ScriptEditorService = game:GetService("ScriptEditorService")
 local Selection = game:GetService("Selection")
 local ServerStorage = game:GetService("ServerStorage")
+local CoreGui = game:GetService("CoreGui")
 
 local Carryover = require(script.Carryover)
 local Exporter = require(script.Exporter)
@@ -20,6 +21,15 @@ local SaveReader = require(script.SaveReader)
 local Widget = require(script.Widget)
 
 local SEQUENCE_TEMPLATE = script.Templates.Sequence
+-- The Sequence version exports are written for: Sequence.new(animation, character), with
+-- :Play(track, data, vfx) playing the cues' Keys, Screen and Target fields itself, and calling
+-- Functions as Function(sequence, effect, character, cue, data).
+local SEQUENCE_VERSION = 8
+
+-- A Sequence module's version, from its `module.Version = n` line (versions before 2 had none).
+local function sequenceVersion(source: string): number
+	return tonumber(string.match(source, "module%.Version%s*=%s*(%d+)")) or 1
+end
 
 local plugin = plugin :: Plugin
 
@@ -163,7 +173,7 @@ end
 
 -- Writes the exported module along with what its code requires: the Sequence module (kept if it's
 -- already there, in case it was edited) and a fresh copy of the VFX objects.
-local function writeModule(name: string, source: string, cues: { Exporter.Cue }): (ModuleScript, number)
+local function writeModule(name: string, source: string, cues: { Exporter.Cue }): (ModuleScript, number, boolean)
 	local recording = ChangeHistoryService:TryBeginRecording("Export Moon VFX cues")
 
 	local folder = ServerStorage:FindFirstChild(EXPORT_FOLDER)
@@ -192,7 +202,16 @@ local function writeModule(name: string, source: string, cues: { Exporter.Cue })
 		module.Parent = folder
 	end
 
-	if not module:FindFirstChild("Sequence") then
+	-- The cues are played by the Sequence module; one from an older export can't play them, so it's
+	-- replaced.
+	local sequence = module:FindFirstChild("Sequence")
+	local updatedSequence = false
+	if sequence and sequence:IsA("ModuleScript") and sequenceVersion(sequence.Source) < SEQUENCE_VERSION then
+		sequence:Destroy()
+		sequence = nil
+		updatedSequence = true
+	end
+	if not sequence then
 		SEQUENCE_TEMPLATE:Clone().Parent = module
 	end
 
@@ -207,11 +226,12 @@ local function writeModule(name: string, source: string, cues: { Exporter.Cue })
 		ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
 	end
 
-	return module, packed
+	return module, packed, updatedSequence
 end
 
--- Exports the selected file. Returns the module, or nil if there was nothing to export.
-local function export(openScript: boolean): ModuleScript?
+-- Exports the selected file. Returns the module and the animation read from the file, or nil if
+-- there was nothing to export.
+local function export(openScript: boolean): (ModuleScript?, any)
 	local entry = state.Selected
 	if not entry then
 		ui:SetStatus("Pick an animation file first.", "error")
@@ -276,7 +296,7 @@ local function export(openScript: boolean): ModuleScript?
 	if result.FrameRateReason and not timestamps then
 		keyKind ..= ` ({result.FrameRateReason})`
 	end
-	local source = Formatter.format({
+	local source, formatWarnings = Formatter.format({
 		TableName = tableName,
 		Lifetime = lifetime,
 		CueTolerance = tolerance,
@@ -288,16 +308,27 @@ local function export(openScript: boolean): ModuleScript?
 		Orphans = orphans,
 	})
 
-	local module, packed = writeModule(entry.Name, source, result.Cues)
+	local module, packed, updatedSequence = writeModule(entry.Name, source, result.Cues)
 	ui:SetPreview(source)
 
-	local flagged, objectless = 0, 0
+	local flagged, objectless, screens, keyframed, adapted, rigNames = 0, 0, 0, 0, 0, {}
 	for _, cue in result.Cues do
 		if #cue.Notes > 0 then
 			flagged += 1
 		end
-		if not cue.Object and not cue.Function then
+		if cue.Screen then
+			screens += 1
+		elseif cue.Animation then
+			keyframed += 1
+		elseif cue.Code and not cue.Function then
+			if cue.Adapted then
+				adapted += 1
+			end
+		elseif not cue.Object and not cue.Function and not cue.Code then
 			objectless += 1
+		end
+		if cue.Rig and not table.find(rigNames, cue.Rig) then
+			table.insert(rigNames, cue.Rig)
 		end
 	end
 
@@ -314,19 +345,56 @@ local function export(openScript: boolean): ModuleScript?
 	if flagged > 0 then
 		message ..= ` {flagged} cues have a comment to check.`
 	end
+	if screens > 0 then
+		message ..= ` {screens} of them {if screens == 1 then "is a screen effect" else "are screen effects"}, which the Sequence module plays.`
+	end
+	if keyframed > 0 then
+		message ..= ` {keyframed} {if keyframed == 1 then "is an effect" else "are effects"} Moon animates with keyframes (Highlights, lights, Lighting, the camera's field of view, moving parts); the Sequence module replays their keys.`
+	end
+	if adapted > 0 then
+		message ..= ` {adapted} {if adapted == 1 then "event's" else "events'"} code from Moon was rewritten to run in game, in the cue's Function.`
+	end
+	if #rigNames > 0 then
+		table.sort(rigNames)
+		message ..= ` Some cues are on {table.concat(rigNames, ", ")}: pass {if #rigNames == 1 then "that character" else "those characters"} to Play, like sequence:Play(track, \{ Rigs = \{ ["{rigNames[1]}"] = victim } }, VFX).`
+	end
+	if updatedSequence then
+		message ..= " Its Sequence module was replaced with the new one, which plays the cues: Sequence.new(module, character):Play(track, data, VFX)."
+	end
+
+	-- Left out: events on things that can't be spawned (Moon's Subtitles, the camera...), events on
+	-- effects their keyframes already play, and parts moving on the camera.
+	local skippedNames, skippedCount = {}, 0
+	for name, count in result.Skipped do
+		table.insert(skippedNames, if count > 1 then `{name} ×{count}` else name)
+		skippedCount += count
+	end
+	if skippedCount > 0 then
+		table.sort(skippedNames)
+		message ..= ` Left out {table.concat(skippedNames, ", ")} (nothing to spawn, already played by keyframes, or moving on the camera).`
+	end
 	if objectless > 0 then
 		message ..= ` {objectless} cues have no VFX object to spawn (events on the rig with no part named in their code).`
 	end
-	if #result.Warnings > 0 then
-		message ..= "\n" .. table.concat(result.Warnings, "\n")
+	-- What couldn't be exported as it is (code that can't run in game, values it can't write...): a
+	-- warning, here and in the Output, and the rest of the export goes ahead.
+	local warnings = table.clone(result.Warnings)
+	for _, warning in formatWarnings do
+		table.insert(warnings, warning)
 	end
-	ui:SetStatus(message, if flagged > 0 or objectless > 0 or #orphans > 0 or #result.Warnings > 0 then "warn" else "ok")
+	if #warnings > 0 then
+		message ..= "\n" .. table.concat(warnings, "\n")
+	end
+	ui:SetStatus(message, if flagged > 0 or objectless > 0 or #orphans > 0 or #warnings > 0 then "warn" else "ok")
 
 	print(`[Moon VFX Exporter] {message}`)
+	for _, warning in warnings do
+		warn(`[Moon VFX Exporter] {warning}`)
+	end
 	if openScript then
 		plugin:OpenScript(module)
 	end
-	return module
+	return module, anim
 end
 
 -- Exports, then asks where to save the module (with its Sequence and VFX objects) as an .rbxm.
@@ -358,12 +426,120 @@ local function saveRbxm()
 	elseif saved then
 		Selection:Set(previous)
 		ui:SetStatus(
-			`Saved "{module.Name}" as an .rbxm. Drop it into ReplicatedStorage and call .Play(character, track).`,
+			`Saved "{module.Name}" as an .rbxm. Drop it into ReplicatedStorage and play it with its Sequence module: Sequence.new(require(it), character):Play(track, data, VFX).`,
 			"ok"
 		)
 	else
 		ui:SetStatus(`Not saved (the save window was closed). {fallback}`, "info")
 	end
+end
+
+-- The preview playing, if any: its sequence, and the copy of the export it plays.
+local previewing: { Sequence: any, Copy: Instance }? = nil
+
+local function stopPreview()
+	local current = previewing
+	if not current then
+		return
+	end
+	previewing = nil
+	pcall(function()
+		current.Sequence:Stop()
+	end)
+	current.Copy:Destroy()
+	ui.Buttons.Preview.Text = "Preview"
+end
+
+-- Exports, then plays the export in Studio on the file's rig, so placements can be checked without
+-- starting a game. It's what a game gets (the module, its VFX and its Sequence), played the same
+-- way, by the clock: Moon's animation doesn't play along. Clicking again stops it.
+local function preview()
+	if previewing then
+		stopPreview()
+		ui:SetStatus("Preview stopped.", "info")
+		return
+	end
+
+	local module, anim = export(false)
+	if not module or not anim then
+		return
+	end
+
+	-- The file's first rig plays it, and its other rigs are given in data.Rigs, as a game would.
+	local rigs = Exporter.rigsOf(anim)
+	local character = rigs[1]
+	if not character then
+		ui:SetStatus("There's no rig in this file to preview the VFX on.", "warn")
+		return
+	end
+	local others = {}
+	for i = 2, #rigs do
+		others[rigs[i].Name] = rigs[i]
+	end
+
+	-- A copy, so require runs this export rather than an older one it has cached. It's not part of
+	-- the place, and neither is anything the preview spawns, so saving mid-preview saves none of it.
+	local copy = module:Clone()
+	copy.Name = "MoonVFXPreview"
+	copy.Archivable = false
+	pcall(function()
+		copy.Parent = CoreGui
+	end)
+
+	local loadedData, data = pcall(require, copy)
+	local sequenceModule = copy:FindFirstChild("Sequence")
+	local loadedSequence, Sequence = pcall(require, sequenceModule :: any)
+	if not (loadedData and loadedSequence and type(data) == "table" and type(Sequence) == "table") then
+		copy:Destroy()
+		local problem = if not loadedData then data elseif not loadedSequence then Sequence else "it didn't return a table"
+		ui:SetStatus(`Couldn't load the export to preview it: {problem}`, "error")
+		return
+	end
+
+	Sequence.Preview = {
+		GuiParent = CoreGui,
+		Spawned = function(object: Instance)
+			object.Archivable = false
+		end,
+	}
+	local ok, sequence = pcall(function()
+		local made = Sequence.new(data, character)
+		made:Play(nil, { Rigs = others }, copy:FindFirstChild("VFX"))
+		return made
+	end)
+	if not ok then
+		copy:Destroy()
+		ui:SetStatus(`Couldn't play the preview: {sequence}`, "error")
+		return
+	end
+
+	local current = { Sequence = sequence, Copy = copy }
+	previewing = current
+	ui.Buttons.Preview.Text = "Stop preview"
+
+	-- Over once the last cue has fired and its VFX are gone.
+	local last = 0
+	for frame in data.Cues do
+		last = math.max(last, frame)
+	end
+	local seconds = last / (data.FrameRate or 1) + (data.Lifetime or 5) + 1
+	task.delay(seconds, function()
+		if previewing == current then
+			stopPreview()
+			ui:SetStatus("Preview finished.", "info")
+		end
+	end)
+
+	local otherNames = {}
+	for name in others do
+		table.insert(otherNames, name)
+	end
+	ui:SetStatus(
+		`Previewing on {character.Name}{if #otherNames > 0 then ` (with {table.concat(otherNames, ", ")} for its Rig cues)` else ""}. `
+			.. "The VFX play by the clock from now, from where the rig stands; Moon's animation doesn't play along. "
+			.. "Click Stop preview to end it. The export's details are in the Output.",
+		"info"
+	)
 end
 
 local function dump()
@@ -411,6 +587,7 @@ end)
 ui.Buttons.Export.MouseButton1Click:Connect(function()
 	export(true)
 end)
+ui.Buttons.Preview.MouseButton1Click:Connect(preview)
 ui.Buttons.SaveRbxm.MouseButton1Click:Connect(saveRbxm)
 ui.Buttons.Dump.MouseButton1Click:Connect(dump)
 
@@ -496,6 +673,7 @@ dock:GetPropertyChangedSignal("Enabled"):Connect(function()
 end)
 
 plugin.Unloading:Connect(function()
+	stopPreview()
 	hook:Destroy()
 	ui:Destroy()
 end)
