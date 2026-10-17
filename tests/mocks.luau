@@ -8,6 +8,7 @@ local _G = {}
 local Vector3MT = {}
 local CFrameMT = {}
 local InstanceMT = {}
+local UDim2MT = {}
 
 local function typeof(value: any): string
 	local mt = getmetatable(value)
@@ -17,6 +18,8 @@ local function typeof(value: any): string
 		return "CFrame"
 	elseif mt == InstanceMT then
 		return "Instance"
+	elseif mt == UDim2MT then
+		return "UDim2"
 	end
 	return builtinTypeof(value)
 end
@@ -46,6 +49,19 @@ end
 -- CFrame (rotation stored row-major, like GetComponents) -------------------------------------
 
 local CFrame = {}
+
+-- Like Roblox's, CFrames are equal when every component is.
+CFrameMT.__eq = function(a, b)
+	if a.x ~= b.x or a.y ~= b.y or a.z ~= b.z then
+		return false
+	end
+	for i = 1, 9 do
+		if a.r[i] ~= b.r[i] then
+			return false
+		end
+	end
+	return true
+end
 
 local function makeCFrame(x, y, z, r)
 	return setmetatable({ x = x, y = y, z = z, r = r }, CFrameMT)
@@ -154,17 +170,19 @@ local Vector2 = {
 		return { X = x, Y = y }
 	end,
 }
-local UDim2 = {
-	new = function(...)
-		return { ... }
-	end,
-	fromOffset = function(...)
-		return { ... }
-	end,
-	fromScale = function(...)
-		return { ... }
-	end,
-}
+local UDim2 = {}
+function UDim2.new(xScale, xOffset, yScale, yOffset)
+	return setmetatable({
+		X = { Scale = xScale or 0, Offset = xOffset or 0 },
+		Y = { Scale = yScale or 0, Offset = yOffset or 0 },
+	}, UDim2MT)
+end
+function UDim2.fromOffset(x, y)
+	return UDim2.new(0, x, 0, y)
+end
+function UDim2.fromScale(x, y)
+	return UDim2.new(x, 0, y, 0)
+end
 local UDim = {
 	new = function(scale, offset)
 		return { Scale = scale, Offset = offset }
@@ -202,10 +220,20 @@ local SUPERCLASSES = {
 	NumberValue = "ValueBase",
 	Vector3Value = "ValueBase",
 	BoolValue = "ValueBase",
+	ObjectValue = "ValueBase",
 	Weld = "JointInstance",
 	Motor6D = "JointInstance",
 	Bone = "Attachment",
 	RopeConstraint = "Constraint",
+	PointLight = "Light",
+	ImageLabel = "GuiObject",
+	TextLabel = "GuiObject",
+	Frame = "GuiObject",
+	GuiObject = "GuiBase2d",
+	ScreenGui = "LayerCollector",
+	LayerCollector = "GuiBase2d",
+	BlurEffect = "PostEffect",
+	ColorCorrectionEffect = "PostEffect",
 }
 
 local Instance = {}
@@ -359,6 +387,15 @@ function methods.GetDescendants(inst)
 	return out
 end
 
+function methods.IsAncestorOf(inst, other)
+	return other:IsDescendantOf(inst)
+end
+
+-- Doesn't wait: in the tests a child is either there or it isn't.
+function methods.WaitForChild(inst, name)
+	return inst:FindFirstChild(name)
+end
+
 function methods.FindFirstChild(inst, name, recursive)
 	for _, child in rawget(inst, "__data").Children do
 		if child.Name == name then
@@ -371,6 +408,15 @@ function methods.FindFirstChild(inst, name, recursive)
 			if found then
 				return found
 			end
+		end
+	end
+	return nil
+end
+
+function methods.FindFirstChildOfClass(inst, className)
+	for _, child in rawget(inst, "__data").Children do
+		if child.ClassName == className then
+			return child
 		end
 	end
 	return nil
@@ -537,6 +583,7 @@ local HttpService = {
 
 local game = Instance.new("DataModel", { Name = "Game" })
 local Workspace = Instance.new("Workspace", { Name = "Workspace", Parent = game })
+local workspace = Workspace
 Instance.new("ServerStorage", { Name = "ServerStorage", Parent = game })
 
 local function resetGame()
@@ -563,11 +610,35 @@ local RunService = {
 	},
 }
 
+-- The tests act as a client, where RenderStepped runs alongside Heartbeat.
+RunService.RenderStepped = RunService.Heartbeat
+RunService.IsClient = function()
+	return true
+end
+
+-- task.delay waits on this clock, which step() moves on by a frame.
+local clock = 0
+local delayed = {}
+
 local function step()
+	clock += 1 / 60
 	for connection, handler in table.clone(heartbeatHandlers) do
 		if connection.Connected then
 			handler(1 / 60)
 		end
+	end
+
+	local due = {}
+	for i = #delayed, 1, -1 do
+		if delayed[i].At <= clock + 1e-9 then
+			table.insert(due, table.remove(delayed, i))
+		end
+	end
+	table.sort(due, function(a, b)
+		return a.At < b.At
+	end)
+	for _, entry in due do
+		entry.Fn(table.unpack(entry.Args, 1, entry.Args.n))
 	end
 end
 
@@ -584,17 +655,29 @@ methods.GetService = function(inst, name)
 		return RunService
 	elseif name == "Debris" then
 		return Debris
+	elseif name == "TweenService" then
+		-- Linear is enough: the tests check values on keyframes.
+		return {
+			GetValue = function(_self, alpha)
+				return alpha
+			end,
+		}
 	end
 	return inst:FindFirstChild(name)
 end
 
--- task runs everything immediately; warn is captured.
+-- task runs everything immediately, except a delay of more than nothing, which waits for step() to
+-- reach it; warn is captured.
 local task = {
 	spawn = function(fn, ...)
 		fn(...)
 	end,
-	delay = function(_seconds, fn, ...)
-		fn(...)
+	delay = function(seconds, fn, ...)
+		if not seconds or seconds <= 0 then
+			fn(...)
+			return
+		end
+		table.insert(delayed, { At = clock + seconds, Fn = fn, Args = table.pack(...) })
 	end,
 	defer = function(fn, ...)
 		fn(...)

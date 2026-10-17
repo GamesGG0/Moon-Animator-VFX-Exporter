@@ -40,8 +40,11 @@ export type Item = {
 	ItemType: string,
 	Instance: Instance?,
 	Tracks: { [string]: { Keyframe } },
+	-- Each keyed property's value before the animation (the track's `default`).
+	Defaults: { [string]: any },
 	Markers: { Marker },
 	Joints: { Joint },
+	PathTypes: { string },
 }
 
 export type SaveEntry = {
@@ -418,8 +421,10 @@ function SaveReader.load(save: StringValue): Animation
 			ItemType = tostring(path.ItemType or "?"),
 			Instance = SaveReader.resolvePath(path),
 			Tracks = {},
+			Defaults = {},
 			Markers = {},
 			Joints = {},
+			PathTypes = if type(path.InstanceTypes) == "table" then path.InstanceTypes else {},
 		}
 
 		local folder = save:FindFirstChild(tostring(index))
@@ -435,6 +440,13 @@ function SaveReader.load(save: StringValue): Animation
 					local track = SaveReader.readTrack(child)
 					if #track > 0 then
 						item.Tracks[child.Name] = track
+					end
+					local default = child:FindFirstChild("default")
+					if default then
+						local ok, value = pcall(readValue, default)
+						if ok and value ~= nil then
+							item.Defaults[child.Name] = value
+						end
 					end
 				end
 			end

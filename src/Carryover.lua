@@ -126,8 +126,24 @@ end
 -- The comment the formatter keeps orphaned Functions in.
 Carryover.ORPHAN_MARKER = "These Functions were on cues that are gone since the last export."
 
+-- The first line of the Functions older exports wrote for screen effects and keyframes (the
+-- Sequence module plays those from the cue's data now). They aren't carried over, unless the line
+-- was deleted to make one yours.
+Carryover.GENERATED_MARKER = "Generated from Moon's keyframes. Re-exporting rewrites this; delete this line to keep your edits."
+
+-- The first line of a Function holding the code an event ran in Moon, to adapt for the game.
+-- Like the line above, it's rewritten on each export until it's deleted.
+Carryover.CODE_MARKER = "The event's code in Moon, to adapt for the game. Re-exporting rewrites this; delete this line to keep your edits."
+
+-- The same, for event code the exporter could rewrite to run in game.
+Carryover.ADAPTED_MARKER = "The event's code in Moon, rewritten to run in game. Re-exporting rewrites this; delete this line to keep your edits."
+
+-- What every version of those lines contains (older exports said "Screen effect from Moon").
+local GENERATED_SIGN = "Re-exporting rewrites this; delete this line to keep your edits."
+
 -- Every cue's Function in a previous export's source, including ones kept in the orphan comment.
--- Cues without one are skipped.
+-- Cues without one are skipped, and so are Functions the exporter wrote itself: this export writes
+-- them afresh.
 function Carryover.extract(src: string): { Found }
 	local found = Carryover.extractCues(src)
 
@@ -145,7 +161,13 @@ function Carryover.extract(src: string): { Found }
 		end
 	end
 
-	return found
+	local yours = {}
+	for _, entry in found do
+		if not string.find(entry.Text, GENERATED_SIGN, 1, true) then
+			table.insert(yours, entry)
+		end
+	end
+	return yours
 end
 
 function Carryover.extractCues(src: string): { Found }
@@ -239,6 +261,12 @@ function Carryover.extractCues(src: string): { Found }
 	return found
 end
 
+-- Cue Functions are called with the sequence first: function(self, effect, character, cue, data).
+-- One written before that, as function(effect, ...), gets the self it's now given.
+function Carryover.upgrade(text: string): string
+	return (string.gsub(text, "^(function%s*%()(%s*effect%f[^%w_])", "%1self, %2", 1))
+end
+
 -- Gives each new cue the Function its previous version had: matched by key, or by effect name
 -- when that's unambiguous. `keyOf` returns a cue's key as the new export writes it. Returns the
 -- Functions that no longer have a cue.
@@ -264,7 +292,7 @@ function Carryover.apply(found: { Found }, cues: { any }, keyOf: (any) -> string
 		end
 
 		if cue then
-			cue.Function = entry.Text
+			cue.Function = Carryover.upgrade(entry.Text)
 		else
 			table.insert(leftover, entry)
 		end

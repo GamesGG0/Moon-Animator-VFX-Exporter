@@ -16,7 +16,6 @@ local ROW_HEIGHT = 26
 local GAP = 6
 local TIPS = {
 	"Tip: Animations, VFX, SFX, or anything visual should stay on the client, NEVER on the server.",
-	"Tip: Make sure to keep all of your VFX objects in a cleaner module and destroy them when done!",
 }
 
 type Painted = {
@@ -461,8 +460,15 @@ function Widget.new(dock: DockWidgetPluginGui)
 	preview.PlaceholderText = "Export to see the generated module here."
 	paint(preview, "TextColor3", Color.ScriptText)
 	paint(preview, "PlaceholderColor3", Color.DimmedText)
+	preview.LayoutOrder = 1
 	preview.Parent = codeScroll
 	self.Preview = preview
+	self.PreviewChunks = {} :: { TextBox }
+
+	-- Long exports are shown in several boxes stacked down the page (see SetPreview).
+	local previewLayout = Instance.new("UIListLayout")
+	previewLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	previewLayout.Parent = codeScroll
 
 	-- A block of text with a coloured bar down its left edge.
 	local function callout(parent: Instance, content: string, barColor: Enum.StudioStyleGuideColor): (Frame, TextLabel, Painted)
@@ -518,7 +524,8 @@ function Widget.new(dock: DockWidgetPluginGui)
 	self.StatusBox, self.Status, self.StatusBar = statusBox, statusLabel, statusBar
 
 	local actionRow = row(footer, 30)
-	self.Buttons.Export = button(actionRow, "Export cues", UDim.new(1, -(88 + GAP + 80 + GAP)), true)
+	self.Buttons.Export = button(actionRow, "Export cues", UDim.new(1, -(96 + GAP + 88 + GAP + 80 + GAP)), true)
+	self.Buttons.Preview = button(actionRow, "Preview", UDim.new(0, 96))
 	self.Buttons.SaveRbxm = button(actionRow, "Save .rbxm", UDim.new(0, 88))
 	self.Buttons.Dump = button(actionRow, "Dump save", UDim.new(0, 80))
 
@@ -678,6 +685,9 @@ function Widget:Repaint()
 			apply(entry)
 		end
 	end
+	for _, extra in self.PreviewChunks do
+		extra.TextColor3 = getTheme():GetColor(Color.ScriptText)
+	end
 	self:CloseMenu()
 	self:SetSaves(self.Saves, self.SelectedSave)
 	self:SetStatus(self.Status.Text, self.StatusKind)
@@ -792,9 +802,44 @@ function Widget:SetStatus(message: string, kind: string?)
 	apply(self.StatusBar)
 end
 
+-- A TextBox stops at 16,384 characters, so long exports are split across several, at line breaks.
+local PREVIEW_CHUNK = 15000
+
 function Widget:SetPreview(source: string)
 	-- TextBoxes don't render tabs.
-	self.Preview.Text = (string.gsub(source, "\t", "    "))
+	local text = (string.gsub(source, "\t", "    "))
+
+	local chunks, current, size = {}, {}, 0
+	for line in string.gmatch(text .. "\n", "(.-)\n") do
+		if size + #line + 1 > PREVIEW_CHUNK and #current > 0 then
+			table.insert(chunks, table.concat(current, "\n"))
+			current, size = {}, 0
+		end
+		while #line > PREVIEW_CHUNK do
+			table.insert(chunks, string.sub(line, 1, PREVIEW_CHUNK))
+			line = string.sub(line, PREVIEW_CHUNK + 1)
+		end
+		table.insert(current, line)
+		size += #line + 1
+	end
+	if #current > 0 then
+		table.insert(chunks, table.concat(current, "\n"))
+	end
+
+	for _, extra in self.PreviewChunks do
+		extra:Destroy()
+	end
+	table.clear(self.PreviewChunks)
+
+	self.Preview.Text = chunks[1] or ""
+	for i = 2, #chunks do
+		local extra = self.Preview:Clone()
+		extra.Text = chunks[i]
+		extra.PlaceholderText = ""
+		extra.LayoutOrder = i
+		extra.Parent = self.Preview.Parent
+		table.insert(self.PreviewChunks, extra)
+	end
 end
 
 function Widget:Destroy()
