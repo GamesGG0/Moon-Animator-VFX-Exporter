@@ -28,7 +28,7 @@ and the `Sequence` module that plays it, in time with the animation, and cleans 
 ```lua
 local sequence = Sequence.new(MoonAnimation, character)
 track:Play()
-sequence:Play(track, data, Resources.VFX)
+sequence:Play(track, data, Resources.VFX) -- track and data are optional; the VFX are required
 ```
 
 ## Features
@@ -70,6 +70,14 @@ sequence:Play(track, nil, {
 	Shine = Resources.VFX.Shine,
 })
 ```
+
+The animation is optional. With `track`, the VFX keep in time with it: they follow its time position, so they keep up if it's sped up, paused, looped or rewound, and once it stops no more cues fire. Without one, pass `nil`, and the cues play by the clock from the moment you call `Play`:
+
+```lua
+sequence:Play(nil, nil, Resources.VFX) -- no animation: the cues play by the clock
+```
+
+`data` is optional too. Only the VFX table is required.
 
 The VFX table names each object the way the cues do: a cue's `Object`, or its `Effect` when it has no `Object`. The comment at the top of the module lists them all, and a Folder holding them works in place of the table. `Play` warns once about any that are missing.
 
