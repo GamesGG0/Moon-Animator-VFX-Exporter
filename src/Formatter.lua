@@ -33,6 +33,9 @@ export type Spec = {
 	Cues: { any },
 	-- Functions from the last export that no longer have a cue.
 	Orphans: { { Key: string, Text: string } }?,
+	-- The animation tool the file is from, for what the module says about it: "Moon" (the
+	-- default) or "Eclipse".
+	Source: string?,
 }
 
 local KEYWORDS = {}
@@ -103,6 +106,22 @@ function Formatter.value(v: any): string?
 		return tostring(v)
 	elseif kind == "CFrame" then
 		return Formatter.cframe(v)
+	elseif kind == "NumberRange" then
+		return `NumberRange.new({number(v.Min)}, {number(v.Max)})`
+	elseif kind == "BrickColor" then
+		return `BrickColor.new({string.format("%q", v.Name)})`
+	elseif kind == "ColorSequence" then
+		local points = {}
+		for _, point in v.Keypoints do
+			table.insert(points, `ColorSequenceKeypoint.new({number(point.Time)}, {Formatter.value(point.Value)})`)
+		end
+		return `ColorSequence.new(\{ {table.concat(points, ", ")} })`
+	elseif kind == "NumberSequence" then
+		local points = {}
+		for _, point in v.Keypoints do
+			table.insert(points, `NumberSequenceKeypoint.new({number(point.Time)}, {number(point.Value)}, {number(point.Envelope)})`)
+		end
+		return `NumberSequence.new(\{ {table.concat(points, ", ")} })`
 	end
 	return nil
 end
@@ -119,7 +138,8 @@ end
 -- Called with a property the module can't write, and the type of its value.
 type Skipped = (string, string) -> ()
 
--- Keys as Lua source lines: Property = { { seconds, value, style, direction }, ... },
+-- Keys as Lua source lines: Property = { { seconds, value, style, direction }, ... }, where a
+-- Bezier key's direction is its control points: { seconds, value, "Bezier", { x1, y1, x2, y2 } }.
 local function keysSource(keys: any, indent: string, skipped: Skipped?): { string }
 	local lines = {}
 	for _, name in sortedKeys(keys) do
@@ -134,7 +154,14 @@ local function keysSource(keys: any, indent: string, skipped: Skipped?): { strin
 				break
 			end
 			local entry = `\{ {number(key.Time)}, {text}`
-			if key.Style and key.Style ~= "Linear" then
+			if key.Style == "Bezier" and type(key.Bezier) == "table" then
+				local points = {}
+				for i = 1, 4 do
+					local point = string.format("%.4g", key.Bezier[i])
+					table.insert(points, if point == "-0" then "0" else point)
+				end
+				entry ..= `, "Bezier", \{ {table.concat(points, ", ")} }`
+			elseif key.Style and key.Style ~= "Linear" and key.Style ~= "Bezier" then
 				entry ..= string.format(", %q", key.Style)
 				if key.Direction then
 					entry ..= string.format(", %q", key.Direction)
@@ -252,31 +279,72 @@ function Formatter.withoutPairs(source: string): string
 	return source
 end
 
+-- What else goes into a cue's Function from an Eclipse event (see Exporter.Cue): the locals
+-- Eclipse gives its code, its code for when it ends and how long after, and the tool's name.
+export type CodeExtras = {
+	Locals: { { Name: string, Value: string } }?,
+	EndCode: string?,
+	EndDelay: number?,
+	Tool: string?,
+}
+
 -- The Function a cue whose event ran code in Moon gets. When the exporter could rewrite the code to
 -- run in game (`adapted`, see Exporter.adaptCode), that's the Function. Otherwise it's the code
 -- commented out, to adapt by hand: `missing` names what it used from the Moon scene, and it warns
 -- (`label` names the cue) when it runs, rather than doing nothing quietly. `asset` is the VFX the
--- cue spawns, if any. Either way its loops don't use ipairs or pairs.
-function Formatter.codeFunction(code: string, asset: string?, adapted: any?, missing: { string }?, label: string?): string
-	local function body(source: string): { string }
+-- cue spawns, if any. An Eclipse event's code starts with the locals Eclipse gives it, and its end
+-- code runs after the event's duration, unless the sequence stops first (`extras`). Either way its
+-- loops don't use ipairs or pairs.
+function Formatter.codeFunction(code: string, asset: string?, adapted: any?, missing: { string }?, label: string?, extras: CodeExtras?): string
+	local more: CodeExtras = extras or {}
+	local tool = more.Tool or "Moon"
+
+	local function body(source: string, indent: string): { string }
 		local lines = {}
 		source = Formatter.withoutPairs(source)
 		for _, line in string.split(string.gsub(string.gsub(source, "\r", ""), "%s+$", ""), "\n") do
-			table.insert(lines, if string.find(line, "%S") then "\t\t\t" .. line else "")
+			table.insert(lines, if string.find(line, "%S") then indent .. line else "")
 		end
 		return lines
+	end
+
+	-- The code itself: its locals, what it does when the event fires, and then when it ends.
+	local function statements(begin: string, finish: string?): { string }
+		local lines = {}
+		for _, entry in more.Locals or {} do
+			table.insert(lines, `\t\t\tlocal {entry.Name} = {entry.Value}`)
+		end
+		if string.find(begin, "%S") then
+			for _, line in body(begin, "\t\t\t") do
+				table.insert(lines, line)
+			end
+		end
+		if finish then
+			table.insert(lines, `\t\t\t-- When the event ends:`)
+			table.insert(lines, `\t\t\tself:AddToCleaner(task.delay({number(more.EndDelay or 0)}, function()`)
+			for _, line in body(finish, "\t\t\t\t") do
+				table.insert(lines, line)
+			end
+			table.insert(lines, "\t\t\tend), math.huge)")
+		end
+		return lines
+	end
+
+	-- The markers say where the code is from (Carryover knows them by how they end).
+	local function marker(text: string): string
+		return (string.gsub(text, "in Moon", "in " .. tool, 1))
 	end
 
 	local lines = { "function(self, effect, character, cue, data)" }
 
 	if adapted then
-		table.insert(lines, `\t\t\t-- {Carryover.ADAPTED_MARKER}`)
+		table.insert(lines, `\t\t\t-- {marker(Carryover.ADAPTED_MARKER)}`)
 		local uses = {}
 		for _, use in adapted.Uses do
 			table.insert(uses, `{use.From} is {use.To}`)
 		end
 		if #uses > 0 then
-			table.insert(lines, `\t\t\t-- Of what it used in Moon's scene, {table.concat(uses, ", ")}.`)
+			table.insert(lines, `\t\t\t-- Of what it used in {tool}'s scene, {table.concat(uses, ", ")}.`)
 		end
 		-- It can only run with what it uses.
 		if adapted.Effect then
@@ -289,29 +357,31 @@ function Formatter.codeFunction(code: string, asset: string?, adapted: any?, mis
 			table.insert(lines, "\t\t\t\treturn")
 			table.insert(lines, "\t\t\tend")
 		end
-		for _, line in body(adapted.Code) do
+		for _, line in statements(adapted.Code, adapted.EndCode) do
 			table.insert(lines, line)
 		end
 		table.insert(lines, "\t\tend")
 		return table.concat(lines, "\n")
 	end
 
+	local commented = statements(code, more.EndCode)
+	local text = table.concat(commented, "\n")
 	local level = ""
-	while string.find(code, "]" .. level .. "]", 1, true) do
+	while string.find(text, "]" .. level .. "]", 1, true) do
 		level ..= "="
 	end
-	table.insert(lines, `\t\t\t-- {Carryover.CODE_MARKER}`)
+	table.insert(lines, `\t\t\t-- {marker(Carryover.CODE_MARKER)}`)
 	table.insert(lines, if asset
 		then `\t\t\t-- In game, effect is the spawned {string.format("%q", asset)} and character is the one playing the move.`
 		else "\t\t\t-- In game, character is the one playing the move.")
 	local uses = if missing and #missing > 0 then table.concat(missing, ", ") else "things"
 	if missing and #missing > 0 then
-		table.insert(lines, `\t\t\t-- It uses {uses} from your Moon scene, which the game won't have: adapt that, then uncomment it.`)
+		table.insert(lines, `\t\t\t-- It uses {uses} from your {tool} scene, which the game won't have: adapt that, then uncomment it.`)
 	end
-	local warning = `[Moon VFX] {label or "A cue"} runs event code from Moon that uses {uses} from the Moon scene, so it does nothing until it's adapted (see its Function).`
+	local warning = `[Moon VFX] {label or "A cue"} runs event code from {tool} that uses {uses} from the {tool} scene, so it does nothing until it's adapted (see its Function).`
 	table.insert(lines, `\t\t\twarn({string.format("%q", warning)})`)
 	table.insert(lines, `\t\t\t--[{level}[`)
-	for _, line in body(code) do
+	for _, line in commented do
 		table.insert(lines, line)
 	end
 	table.insert(lines, `\t\t\t]{level}]`)
@@ -367,15 +437,40 @@ local function headFields(cue: any): { string }
 	if cue.Animation and TARGETS[cue.Animation.Kind] then
 		table.insert(head, string.format("Target = %q", cue.Animation.Kind))
 	end
-	if cue.Animation and cue.Animation.Hold then
-		table.insert(head, `Hold = {number(cue.Animation.Hold)}`)
+	local hold = (cue.Animation and cue.Animation.Hold) or (cue.Screen and cue.Screen.Hold)
+	if hold then
+		table.insert(head, `Hold = {number(hold)}`)
+	end
+	if cue.EmitCount then
+		table.insert(head, `EmitCount = {number(cue.EmitCount)}`)
 	end
 	return head
 end
 
--- The fields after the Offset: what the Sequence plays (Path, Properties, Keys) and the Function.
--- `label` names the cue in warnings; `warn` is told what couldn't be written.
-local function tailFields(cue: any, label: string, warn: (string) -> ()): { string }
+-- The emitter every cue's VFX can share (see Exporter.Cue's Emitter): the module the events
+-- emitted with, when they all used the same one and no cue's VFX was emitted another way (with VFX
+-- Forge, or by Eclipse, which the Sequence's own emit does).
+local function sharedEmitter(cues: { any }): { Name: string, Module: string }?
+	local shared = nil
+	for _, cue in cues do
+		if cue.DefaultEmit then
+			return nil
+		end
+		if type(cue.Emitter) == "table" then
+			if shared and shared.Name ~= cue.Emitter.Name then
+				return nil
+			end
+			shared = cue.Emitter
+		end
+	end
+	return shared
+end
+
+-- The fields after the Offset: what the Sequence plays (Path, Properties, Keys), how it emits the
+-- cue's VFX when that isn't the table's way, and the Function. `label` names the cue in warnings;
+-- `warn` is told what couldn't be written; `tool` is where the animation was made; `shared` is the
+-- emit the table gives every cue, if any.
+local function tailFields(cue: any, label: string, warn: (string) -> (), tool: string?, shared: string?): { string }
 	local tail = {}
 	local keys = nil
 	local function skippedKeys(name: string, kind: string)
@@ -419,10 +514,17 @@ local function tailFields(cue: any, label: string, warn: (string) -> ()): { stri
 		end
 	end
 
+	if cue.Emitter == false then
+		table.insert(tail, "Emitter = false")
+	elseif type(cue.Emitter) == "table" and cue.Emitter.Name ~= shared then
+		table.insert(tail, string.format("Emitter = %q", cue.Emitter.Name))
+	end
+
 	if cue.Function then
 		table.insert(tail, `Function = {Formatter.withoutPairs(cue.Function)}`)
 	elseif cue.Code then
-		table.insert(tail, `Function = {Formatter.codeFunction(cue.Code, cue.Asset, cue.Adapted, cue.CodeMissing, label)}`)
+		local extras = { Locals = cue.Locals, EndCode = cue.EndCode, EndDelay = cue.EndDelay, Tool = tool }
+		table.insert(tail, `Function = {Formatter.codeFunction(cue.Code, cue.Asset, cue.Adapted, cue.CodeMissing, label, extras)}`)
 	end
 	return tail
 end
@@ -471,7 +573,7 @@ local function usage(spec: Spec, name: string): { string }
 
 	if rig then
 		table.insert(lines, "--")
-		table.insert(lines, "-- Cues with a Rig were on another rig in Moon. Give its character in data.Rigs:")
+		table.insert(lines, `-- Cues with a Rig were on another rig in {spec.Source or "Moon"}. Give its character in data.Rigs:`)
 		table.insert(lines, `--   sequence:Play(track, \{ Rigs = \{ ["{rig}"] = victim } }, VFX)`)
 	end
 	if screen then
@@ -534,6 +636,13 @@ function Formatter.format(spec: Spec): (string, { string })
 		-- Cue keys are frames at this rate.
 		add(`\tFrameRate = {number(spec.FPS or 60)},`)
 	end
+	-- How the events emitted their VFX, when it was a module's emit method: the Sequence emits every
+	-- cue's VFX the same way, so no cue needs a Function for it.
+	local shared = sharedEmitter(spec.Cues)
+	if shared then
+		add(`\t-- {spec.Source or "Moon"}'s events emitted their VFX with {shared.Module}, so the Sequence emits each cue's VFX with it too.`)
+		add(string.format("\tEmitter = %q,", shared.Name))
+	end
 	add("")
 
 	if #spec.Cues == 0 then
@@ -560,7 +669,7 @@ function Formatter.format(spec: Spec): (string, { string })
 				line ..= `,{string.rep(" ", headWidth - #heads[i] + 1)}Offset = {Formatter.cframe(cue.Offset)}`
 			end
 			local label = `Cue {keys[i]:sub(1, -3)} "{cue.Effect}"`
-			for _, field in tailFields(cue, label, warn) do
+			for _, field in tailFields(cue, label, warn, spec.Source, shared and shared.Name) do
 				line ..= ", " .. field
 			end
 			line ..= " },"

@@ -529,7 +529,7 @@ function Widget.new(dock: DockWidgetPluginGui)
 	self.Buttons.SaveRbxm = button(actionRow, "Save .rbxm", UDim.new(0, 88))
 	self.Buttons.Dump = button(actionRow, "Dump save", UDim.new(0, 80))
 
-	text(footer, "Exports read the saved file, so save in Moon Animator (Ctrl+S) first.", Color.DimmedText, 13)
+	text(footer, "Exports read the saved file, so save in Moon Animator (Ctrl+S) or Eclipse Animator first.", Color.DimmedText, 13)
 
 	-- The body fills whatever the footer leaves.
 	local function fitBody()
@@ -723,7 +723,7 @@ function Widget:SetSaves(saves: { any }, selected: any?)
 		empty.Font = Enum.Font.SourceSans
 		empty.TextSize = 14
 		empty.TextWrapped = true
-		empty.Text = "No Moon Animator 2 saves in ServerStorage yet.\nSave an animation in Moon, then click Refresh."
+		empty.Text = "No Moon Animator 2 saves or Eclipse Animator projects in ServerStorage yet.\nSave an animation in Moon or Eclipse, then click Refresh."
 		empty.TextColor3 = theme:GetColor(Color.DimmedText)
 		empty.Parent = self.SaveList
 		return
@@ -766,7 +766,8 @@ function Widget:SetSaves(saves: { any }, selected: any?)
 		time.Font = Enum.Font.SourceSans
 		time.TextSize = 13
 		time.TextXAlignment = Enum.TextXAlignment.Right
-		time.Text = formatTime(entry.Modified)
+		-- Eclipse's projects don't say when they were saved; they're marked as Eclipse's instead.
+		time.Text = if entry.Source == "Eclipse" then "Eclipse" else formatTime(entry.Modified)
 		time.TextColor3 = theme:GetColor(Color.DimmedText, modifier)
 		time.Parent = rowButton
 

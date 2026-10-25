@@ -1,6 +1,6 @@
 # Moon VFX Exporter
 
-A Roblox Studio plugin that turns the events in a [Moon Animator 2](https://create.roblox.com/store/asset/4725618216) animation into ready-to-use VFX code. Created by Games.GG.
+A Roblox Studio plugin that turns the events in a [Moon Animator 2](https://create.roblox.com/store/asset/4725618216) animation, or an [Eclipse Animator](https://create.roblox.com/store/asset/86116556258301) project, into ready-to-use VFX code. Created by Games.GG.
 
 ## [Download on the Creator Store](https://create.roblox.com/store/asset/88386490728445/Moon-VFX-Exporter)
 
@@ -35,7 +35,7 @@ sequence:Play(track, data, Resources.VFX) -- track and data are optional; the VF
 
 - **Exact offsets, straight from the save.** Each effect's CFrame and the HumanoidRootPart's are worked out from the keyframes: easing, rig joints and rig movement included. Where Moon's playhead was left doesn't matter.
 - **One module plays everything.** The exported table is only data. The `Sequence` module clones each cue's VFX from the objects you give it, places, emits and animates them, plays screen, Lighting and camera effects, and removes it all after its `Lifetime` or as soon as you call `sequence:Stop()`.
-- **Works with VFX Forge and Part_Icles.** Events whose code calls `shared.vfx.emit(a, b, ...)` or `Part_Icles:AbsoluteEmit(a)` become cues for what they emit, whichever item the event sits on, even Moon's Subtitles. Locals in the code (`local A = game:GetService(...)`, `local VFX = workspace.Barrage`) are followed. When an event names emitters inside a part or attachment, they're one cue, and only they are packed and fired, not everything else in there. A beam brings the attachments at both its ends. In game, the Sequence emits through `shared.vfx.emit` when your game has it, just like in Moon.
+- **Works with VFX Forge, Part_Icles and your own emitter.** Events whose code calls `shared.vfx.emit(a, b, ...)`, or an emit method of a module it requires (`local VFX = require(ReplicatedStorage.Utilities.VFX)` then `VFX:Emit(part)`, or `Part_Icles:AbsoluteEmit(a)`), become cues for what they emit, whichever item the event sits on, even Moon's Subtitles. Locals in the code (`local A = game:GetService(...)`, `local VFX = workspace.Barrage`) are followed. When an event names emitters inside a part or attachment, they're one cue, and only they are packed and fired, not everything else in there. A beam brings the attachments at both its ends. In game, the Sequence emits through `shared.vfx.emit` when your game has it, just like in Moon. With your own module, the export only names it (`Emitter = "ReplicatedStorage.Utilities.VFX:Emit"`), and the Sequence requires that module once (never cloned, though code made for Moon often does `require(X:Clone())`) and emits every cue's VFX with it, so those cues need no `Function`. If the code does more than emit, the rest stays in the cue's `Function`. If it uses the module for more than emitting (`Part_Icles:Activate()`, say), or emits inside an `if` or a loop, the code stays whole in the `Function`, which then does the emitting (`Emitter = false`). Either way each VFX is emitted once.
 - **Camera effects.** VFX on the part Moon's camera is attached to get `Parent = "Camera"`, and in game they stay in front of the player's camera.
 - **Effects that follow a body part.** A cue can have a `Parent`, a part or attachment of the character. The effect spawns there and stays attached.
 - **Keyframed effects.** Effects Moon animates with keyframes instead of events become cues too, at their first key, with the keys as data (`Keys`) that the Sequence replays with Moon's easing: a Highlight flashing its fill, a PointLight pulsing, `Lighting.ExposureCompensation`, the camera's field of view, a part (a BezTrail, say) moving along a path. Lights in a prop are spawned where the prop was; a moving part starts when it starts moving, with its path relative to the character. Such an effect stays until its keys finish, even past the table's `Lifetime`. Lighting and the field of view hold their last values until the animation ends, as in Moon, then go back.
@@ -49,6 +49,7 @@ sequence:Play(track, data, Resources.VFX) -- track and data are optional; the VF
 - **Only real VFX.** Events on things that aren't VFX objects (Moon's Subtitles and other GUI, the camera) only count for what their code emits or runs; empty ones are left out, and the status line lists them. A Highlight goes on the character, and an emitter, light or sound inside a part spawns with its part.
 - **Preview in Studio.** **Preview** exports, then plays the export on the file's rig in edit mode, so you can check where the VFX land without starting a game. It runs what the game gets (the module, its VFX and its Sequence), by the clock; Moon's animation doesn't play along. Click **Stop preview** to end it; nothing it spawns is saved with the place.
 - **One-click file.** **Save .rbxm** saves the module, Sequence and VFX objects as one file you can drop into any place.
+- **Eclipse Animator projects too.** Projects saved in Eclipse Animator are listed next to Moon's files and export the same way (see [From Eclipse Animator](#from-eclipse-animator)): Eclipse's own emits, event code, keyed effects, rigs, camera field of view and screen effects, with its curves replayed as Eclipse plays them.
 - **Built into Moon Animator.** An **Export VFX** button sits next to Moon's Options button.
 - **Frame or time keys.** Cues are keyed by frame number or by time in seconds. The frame rate is raised automatically when events need more precision.
 
@@ -95,11 +96,29 @@ To end the move early (the character got hit, say), call `sequence:Stop()`: the 
 
 > **Tip:** Animations, VFX, SFX, or anything visual should stay on the client, NEVER on the server.
 
+### From Eclipse Animator
+
+1. In Eclipse Animator, add events to the timeline items at the frames they should fire, and save the project. Eclipse keeps it in `ServerStorage › Eclipse Animator Saves › EclipseAnimator_Saves`, which is what the plugin reads.
+2. Open **VFX Exporter** from the Plugins tab, pick the project (it's marked **Eclipse** in the list) and click **Export cues**. The export is the same module, `Sequence` and `VFX` as for Moon, played the same way.
+
+What it reads from the project:
+
+- **Emits.** An event's emits become cues for what they emit, found from the item the event is on: **Exact** emits just the effect it names, **Selected** the effects right inside what it names, **All** everything in it. A count set on the emit becomes the cue's `EmitCount`.
+- **Switching effects on and off.** An emit set to **Enable** or **Disable** becomes keys on the effect's `Enabled`, which the Sequence replays: it spawns when it's switched on, and what it gave off has time to fade once it's switched off.
+- **Event code.** Code an event runs when it fires, and when it ends (after its duration), goes into the cue's `Function`, rewritten to run in game like Moon's. It starts with what Eclipse gives event code, for the names it uses: `rig` (what the event is on: usually `character`), `parameter`, `event`, and `context`, a table the two parts share. The end code runs after the event's duration, unless the sequence stops first.
+- **Keyed effects.** Property tracks on lights, Highlights, emitters, parts, Lighting and post effects become keyframed cues, as in Moon. Eclipse's easing styles carry over as they are. Its default style, **Bezier** with automatic handles, depends on the keys either side and is smoothed through a run of keys. A key whose value is one number becomes a `"Bezier"` key with its curve's two control points. A value whose parts curve differently, like a Vector3 on a bent path, gets a key at each frame where a straight line wouldn't do. Either way it plays as it does in Eclipse.
+- **Rigs.** Joints are posed from their keyed `C0`, and Eclipse's master control moves the whole rig, so offsets are measured from where the character really is at each event.
+- **The camera's field of view**, from Eclipse's camera rigs.
+- **Screen effects.** Eclipse's **Vignette**, **Screen Cover**, **Impact Frames** (one cue per image it shows, the built-in White, Black, Burst and Inverse ones included) and solid **Letterbox** become screen cues, drawn the way Eclipse draws them. One that's still showing when its keys end stays until the animation does.
+- Items switched off in Eclipse's timeline are left out.
+
+Not exported yet, with a warning when a project has them: camera shakes, letterboxes made of effects (solid ones work), keyed letterbox bar sizes, a gradient's colour keys, and animation layers (only the layer being edited when the project was saved is read). Event sounds and subtitles aren't VFX, so they're left out.
+
 ### The exporter window
 
 | Setting | What it does |
 | --- | --- |
-| **Animation file** | The Moon save to export. **Use file open in Moon** picks the one Moon has open. Moon's autosaves aren't listed. |
+| **Animation file** | The Moon save or Eclipse project to export (Eclipse's are marked **Eclipse**). **Use file open in Moon** picks the one Moon has open. Moon's autosaves aren't listed. |
 | **Table name** | The variable name in the generated code. Defaults to `MoonAnimation`. |
 | **Lifetime** | Seconds before a spawned effect is removed. Defaults to the animation's length. |
 | **CueTolerance** | Seconds a cue may already be overdue when `Play` starts (e.g. partway through the animation) before it's skipped. |
@@ -140,14 +159,23 @@ Re-exporting rewrites the cues and rebuilds `VFX`. It keeps `Sequence` if one is
 | `Object` | The name of the VFX to spawn, when it isn't `Effect`. |
 | `Parent` | A part or attachment of the character the effect spawns on and follows (`"HumanoidRootPart"` included). Without one, it's placed from the HumanoidRootPart and stays put. `"Camera"` keeps it in front of the camera. |
 | `Rig` | The effect was on another rig in Moon. It plays on `data.Rigs[Rig]` instead of the character. |
-| `Keys` | Keyframes the Sequence plays: `{ Property = { { seconds, value, easingStyle, easingDirection }, ... } }`. CFrame keys are offsets, like `Offset`. |
+| `Keys` | Keyframes the Sequence plays: `{ Property = { { seconds, value, easingStyle, easingDirection }, ... } }`. CFrame keys are offsets, like `Offset`. An Eclipse Bezier key has its curve's control points where the direction goes: `{ seconds, value, "Bezier", { x1, y1, x2, y2 } }`. |
+| `EmitCount` | Optional. How many particles each of the VFX's ParticleEmitters gives off, instead of its own `EmitCount` (from an Eclipse emit's count). |
+| `Emitter` | Optional. The emitter this cue's VFX is emitted with, when its event emitted with a different module than the table's `Emitter` (named the same way); or `false` when its `Function` emits it. |
 | `Path` | Names leading from the spawned VFX to what `Keys` animate, e.g. `{ "i1", "PointLight" }`; for a screen effect, from the effect to its keyed piece. |
 | `Screen` | A screen effect to show instead of a VFX: a GUI class such as `"ImageLabel"`, or a post effect such as `"BlurEffect"`, set up with `Properties` and animated by `Keys`. Moon's vignette is four images tiling the screen (no image can be 1920 by 1080) and its letterbox two bars, so a screen effect's other pieces come in `Children` (each with its `Name`, `ClassName`, `Properties` and own `Children`). `Keys` play on the piece `Path` leads to, or the effect itself, and on the pieces marked `Mirrors`, as Moon copies its look onto them. |
-| `Target` | `"Lighting"` or `"Camera"`: `Keys` play on that instead, held for `Hold` seconds, then put back. |
+| `Target` | `"Lighting"` or `"Camera"`: `Keys` play on that instead, held for `Hold` seconds, then put back. A `Screen` with a `Hold` is shown for that long, if it's longer than its keys. |
 | `Lifetime` | Optional. Seconds before this cue's VFX is removed, instead of the table's. |
 | `Function` | Optional. `function(self, effect, character, cue, data)`, run right after the cue's VFX spawns. `self` is the sequence, `effect` is `nil` if the cue has no VFX, and `data` is what you passed to `Play`. If it errors (code that isn't supported in game, say), that's a warning, and the other cues still play. A `Function` from before `self` was passed, `function(effect, ...)`, gets it added when you export again. |
 
-`Lifetime`, `CueTolerance` and `FrameRate` (the rate the cue keys are in) sit at the top of the table.
+`Lifetime`, `CueTolerance` and `FrameRate` (the rate the cue keys are in) sit at the top of the table, and so does `Emitter` when the events emitted with a module of yours:
+
+```lua
+	-- Moon's events emitted their VFX with ReplicatedStorage.Utilities.VFX, so the Sequence emits each cue's VFX with it too.
+	Emitter = "ReplicatedStorage.Utilities.VFX:Emit",
+```
+
+That's the ModuleScript from a service down, then the method, called with `:` or `.` as the events called it. The Sequence requires the module once, the first time it's needed, and emits every cue's VFX with it instead of with `Sequence.Emit`. If it isn't there, that's a warning, and `Sequence.Emit` stands in.
 
 ### The Sequence module
 
@@ -156,10 +184,11 @@ Re-exporting rewrites the cues and rebuilds `VFX`. It keeps `Sequence` if one is
 | `Sequence.new(animation, character, frameRate, tolerance)` | A sequence of the exported table's cues, played on `character`. `frameRate` (optional) is the rate the cue keys are in; it defaults to the table's `FrameRate`, or 1 when its keys are in seconds. `tolerance` (optional) is how many seconds a cue may already be overdue when the sequence first reaches it (say, `Play` was called partway through the track) before it's skipped; it defaults to the table's `CueTolerance`, or no limit. Frame-rate dips and hitches never skip cues. |
 | `sequence:Play(track, data, vfx)` | Plays the cues, on the client only: on the server it warns and plays nothing (so does `Spawn`). `track` (optional) is the AnimationTrack to keep in time with; call `Play` right after `track:Play()`. Without one, the cues play by the clock. `data` (optional) goes to every cue's `Function`. `vfx` (required) holds the objects the cues use, by name, or is a Folder of them. |
 | `sequence:Stop()` | Cancels the cues still to come and removes everything the sequence spawned: VFX, screen effects, and Lighting and camera changes (put back as they were), and everything added to its cleaner. |
-| `sequence:AddToCleaner(thing, lifetime)` | Has the sequence clean up something a `Function` made, like its VFX: an Instance is destroyed, a connection disconnected, a function called. That happens when the sequence stops, or after `lifetime` seconds (optional: the animation's `Lifetime`; `math.huge` waits for the stop). Returns `thing`, so `local highlight = self:AddToCleaner(Instance.new("Highlight"))` works. |
+| `sequence:AddToCleaner(thing, lifetime)` | Has the sequence clean up something a `Function` made, like its VFX: an Instance is destroyed, a connection disconnected, a function called, a thread (from `task.delay`, say) cancelled. That happens when the sequence stops, or after `lifetime` seconds (optional: the animation's `Lifetime`; `math.huge` waits for the stop). Returns `thing`, so `local highlight = self:AddToCleaner(Instance.new("Highlight"))` works. |
 | `sequence:Spawn(cue, data, vfx)` | Fires one cue right away. `data` and `vfx` default to what was given to `Play`. |
 | `Sequence.Preload(animation, vfx)` | Loads the images the cues' ImageLabels show ahead of time (screen effects' images, and ImageLabels and ImageButtons in the VFX), so they don't pop in late. `Sequence.new` and `Play` do it themselves; call it earlier (when the character spawns, say) to load them sooner. `vfx` is optional, and each image is only loaded once. |
-| `Sequence.Emit(object)` | Fires the effects in a spawned VFX, through VFX Forge's `shared.vfx.emit` when the game has it. Otherwise ParticleEmitters use their `EmitCount`, `EmitDelay` and `EmitDuration` attributes when they have them, and Sounds play. To use some other emitter, replace it: `Sequence.Emit = yourEmit`. |
+| `Sequence.Emit(object, count)` | Fires the effects in a spawned VFX, through VFX Forge's `shared.vfx.emit` when the game has it. Otherwise ParticleEmitters use their `EmitCount`, `EmitDelay` and `EmitDuration` attributes when they have them (`count`, optional, is how many particles each gives off instead: a cue's `EmitCount`), and Sounds play. An export's `Emitter` (or a cue's) is used instead when it names one. To use some other emitter everywhere, replace it: `Sequence.Emit = yourEmit`. |
+| `Sequence.Emitter(name)` | The emitter an export names, such as `"ReplicatedStorage.Utilities.VFX:Emit"`: a function that emits a VFX with that module, which is required once, the first time. Returns `nil` and why when there's no such module or method. |
 
 Its helpers can be used in your own `Function`s too. Each returns what it made or animated, and a function that undoes it now:
 
@@ -190,6 +219,8 @@ This installs the plugin straight into your Studio plugins folder. Use `rojo bui
 | Module | Job |
 | --- | --- |
 | `SaveReader` | Reads Moon Animator 2 saves: items, tracks, rig joints and events. |
+| `EclipseReader` | Reads Eclipse Animator projects into the same items, tracks, joints and events. |
+| `EclipseCurves` | Eclipse's easing and automatic Bézier curves, as Moon-style keys. |
 | `Sampler`, `Easing` | Evaluate a keyframe track at any frame. |
 | `RigPose` | Works out where any part of a rig is at any frame. |
 | `Exporter` | Turns events and keyframed effects into cues: offsets, `Parent`, `Rig`, frame rate. |
@@ -216,3 +247,4 @@ python tests/run.py
 - The camera's own movement (a cutscene camera) isn't exported, only its field of view. Keyframed movement of something on Moon's camera part isn't replayed either: an emitted one is placed where it is when it fires, and one with no events is listed with the left-out items.
 - The **Export VFX** button inside Moon Animator and the "Use file open in Moon" detection rely on Moon Animator's internal, undocumented API (`_G.MoonGlobal`), so a Moon update could break them. Everything else only reads Moon's save files.
 - Moon's save format was worked out with help from [Moonlite](https://github.com/MaximumADHD/Moonlite) by MaximumADHD.
+- Eclipse Animator's project format was worked out from what the plugin writes, and checked by reading back projects written by Eclipse's own save code. Its curves were checked against Eclipse's own interpolation, which they match. Rig poses use each joint's keys the way Eclipse eases a property, so a rig animated with the graph editor's per-axis curves or IK may be slightly off between keys (keys themselves are exact). Like everything that reads another plugin's saves, a new Eclipse version could change the format.

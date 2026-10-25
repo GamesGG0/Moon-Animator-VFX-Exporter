@@ -2,7 +2,8 @@
 -- Moon VFX Exporter
 -- Created by Games.GG
 --
--- Turns the events in a Moon Animator 2 file into a table of VFX cues:
+-- Turns the events in a Moon Animator 2 file (or an Eclipse Animator project) into a table of VFX
+-- cues:
 --   [frame] = { Effect = "Name", Offset = <effect CFrame relative to the HumanoidRootPart> }
 -- exported as a ModuleScript that can play them, with a Sequence module and the VFX objects inside.
 
@@ -13,6 +14,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local CoreGui = game:GetService("CoreGui")
 
 local Carryover = require(script.Carryover)
+local EclipseReader = require(script.EclipseReader)
 local Exporter = require(script.Exporter)
 local Formatter = require(script.Formatter)
 local MoonHook = require(script.MoonHook)
@@ -22,9 +24,10 @@ local Widget = require(script.Widget)
 
 local SEQUENCE_TEMPLATE = script.Templates.Sequence
 -- The Sequence version exports are written for: Sequence.new(animation, character), with
--- :Play(track, data, vfx) playing the cues' Keys, Screen and Target fields itself, and calling
--- Functions as Function(sequence, effect, character, cue, data).
-local SEQUENCE_VERSION = 8
+-- :Play(track, data, vfx) playing the cues' Keys (Bezier ones too), Screen, Target and EmitCount
+-- fields itself, emitting with the emitter the table or a cue names, calling Functions as
+-- Function(sequence, effect, character, cue, data), and cleaning up threads a Function hands it.
+local SEQUENCE_VERSION = 11
 
 -- A Sequence module's version, from its `module.Version = n` line (versions before 2 had none).
 local function sequenceVersion(source: string): number
@@ -84,7 +87,7 @@ local state = {
 local toolbar = plugin:CreateToolbar("Moon VFX Exporter")
 local toolbarButton = toolbar:CreateButton(
 	"MoonVFXExporter",
-	"Turn Moon Animator events into VFX offset cues",
+	"Turn Moon Animator and Eclipse Animator events into VFX cues",
 	"",
 	"VFX Exporter"
 )
@@ -144,9 +147,23 @@ local function selectSave(entry: SaveReader.SaveEntry?)
 	end
 end
 
+-- The reader for a file: Moon's, or Eclipse's for an Eclipse project.
+local function readerFor(entry: SaveReader.SaveEntry): any
+	return if entry.Source == "Eclipse" then EclipseReader else SaveReader
+end
+
 local function refreshSaves()
-	local ok, saves = pcall(SaveReader.findSaves)
-	state.Saves = if ok then saves else {}
+	-- Moon's files (most recent first), then Eclipse's projects.
+	local saves = {}
+	for _, reader in { SaveReader, EclipseReader } do
+		local ok, found = pcall(reader.findSaves)
+		if ok then
+			for _, entry in found do
+				table.insert(saves, entry)
+			end
+		end
+	end
+	state.Saves = saves
 
 	local keep = nil
 	if state.Selected then
@@ -161,12 +178,23 @@ local function refreshSaves()
 end
 
 local function selectOpenSave(): SaveReader.SaveEntry?
-	local entry, how = MoonHook.detectOpenSave(state.Saves)
+	local moonSaves = {}
+	for _, saved in state.Saves do
+		if saved.Source == nil then
+			table.insert(moonSaves, saved)
+		end
+	end
+	local entry, how = MoonHook.detectOpenSave(moonSaves)
+	-- With no Moon files, an Eclipse project (Eclipse doesn't say which one it has open).
+	if not entry and #state.Saves > 0 then
+		entry = state.Saves[1]
+		how = if #state.Saves == 1 then "the Eclipse Animator project in this place" else `the first of {#state.Saves} Eclipse Animator projects`
+	end
 	selectSave(entry)
 	if entry then
 		ui:SetStatus(`Selected "{entry.Name}" ({how}).`, "info")
 	else
-		ui:SetStatus("No Moon Animator 2 saves found. Save your animation in Moon first.", "warn")
+		ui:SetStatus("No Moon Animator 2 saves or Eclipse Animator projects found. Save your animation in Moon or Eclipse first.", "warn")
 	end
 	return entry
 end
@@ -238,7 +266,9 @@ local function export(openScript: boolean): (ModuleScript?, any)
 		return nil
 	end
 
-	local loaded, anim = pcall(SaveReader.load, entry.Save)
+	local eclipse = entry.Source == "Eclipse"
+	local tool = if eclipse then "Eclipse" else "Moon"
+	local loaded, anim = pcall(readerFor(entry).load, entry.Save)
 	if not loaded then
 		ui:SetStatus(`Couldn't read "{entry.Name}": {anim}`, "error")
 		return nil
@@ -248,17 +278,20 @@ local function export(openScript: boolean): (ModuleScript?, any)
 		EffectName = state.EffectName,
 		Origin = if state.Origin and state.Origin.Parent then state.Origin else nil,
 		Target = if state.Target and state.Target.Parent then state.Target else nil,
-		MoonEasing = MoonHook.getEasingFunctions(),
+		-- Moon's own easing functions, for Moon's keys; Eclipse's eases are worked out from the save.
+		MoonEasing = if eclipse then nil else MoonHook.getEasingFunctions(),
 		FrameRate = if type(state.ExportFps) == "number" then state.ExportFps else nil,
 	})
 
 	if #result.Cues == 0 then
 		ui:SetPreview("")
-		ui:SetStatus(
-			`No events found in "{entry.Name}". If you just added them, save in Moon (Ctrl+S) and export again. `
-				.. "If they still don't show up, click Dump save and check the outline.",
-			"warn"
-		)
+		local saveHint = if eclipse then "save the project in Eclipse" else "save in Moon (Ctrl+S)"
+		local message = `No events found in "{entry.Name}". If you just added them, {saveHint} and export again. `
+			.. "If they still don't show up, click Dump save and check the outline."
+		if #result.Warnings > 0 then
+			message ..= "\n" .. table.concat(result.Warnings, "\n")
+		end
+		ui:SetStatus(message, "warn")
 		return nil
 	end
 
@@ -300,18 +333,19 @@ local function export(openScript: boolean): (ModuleScript?, any)
 		TableName = tableName,
 		Lifetime = lifetime,
 		CueTolerance = tolerance,
-		Header = `Moon Animator file "{entry.Name}" ({anim.FPS} fps). Cue keys are {keyKind}.`,
+		Header = `{if eclipse then "Eclipse Animator project" else "Moon Animator file"} "{entry.Name}" ({anim.FPS} fps). Cue keys are {keyKind}.`,
 		Timestamps = timestamps,
 		FPS = rate,
 		Runtime = true,
 		Cues = result.Cues,
 		Orphans = orphans,
+		Source = if eclipse then "Eclipse" else nil,
 	})
 
 	local module, packed, updatedSequence = writeModule(entry.Name, source, result.Cues)
 	ui:SetPreview(source)
 
-	local flagged, objectless, screens, keyframed, adapted, rigNames = 0, 0, 0, 0, 0, {}
+	local flagged, objectless, screens, keyframed, adapted, rigNames, emitters = 0, 0, 0, 0, 0, {}, {}
 	for _, cue in result.Cues do
 		if #cue.Notes > 0 then
 			flagged += 1
@@ -330,9 +364,16 @@ local function export(openScript: boolean): (ModuleScript?, any)
 		if cue.Rig and not table.find(rigNames, cue.Rig) then
 			table.insert(rigNames, cue.Rig)
 		end
+		local emitter = cue.Emitter
+		if type(emitter) == "table" and not table.find(emitters, emitter.Module) then
+			table.insert(emitters, emitter.Module)
+		end
 	end
 
 	local message = `Exported {#result.Cues} cues and {packed} VFX objects to {module:GetFullName()}.`
+	if #emitters > 0 then
+		message ..= ` The events emitted with {table.concat(emitters, ", ")}, so the Sequence emits their VFX with {if #emitters == 1 then "it" else "them"} (required once, not cloned), and those cues need no Function for it.`
+	end
 	if kept > 0 then
 		message ..= ` Kept {kept} cue Function{if kept == 1 then "" else "s"} from the last export.`
 	end
@@ -349,10 +390,10 @@ local function export(openScript: boolean): (ModuleScript?, any)
 		message ..= ` {screens} of them {if screens == 1 then "is a screen effect" else "are screen effects"}, which the Sequence module plays.`
 	end
 	if keyframed > 0 then
-		message ..= ` {keyframed} {if keyframed == 1 then "is an effect" else "are effects"} Moon animates with keyframes (Highlights, lights, Lighting, the camera's field of view, moving parts); the Sequence module replays their keys.`
+		message ..= ` {keyframed} {if keyframed == 1 then "is an effect" else "are effects"} {tool} animates with keyframes (Highlights, lights, Lighting, the camera's field of view, moving parts); the Sequence module replays their keys.`
 	end
 	if adapted > 0 then
-		message ..= ` {adapted} {if adapted == 1 then "event's" else "events'"} code from Moon was rewritten to run in game, in the cue's Function.`
+		message ..= ` {adapted} {if adapted == 1 then "event's" else "events'"} code from {tool} was rewritten to run in game, in the cue's Function.`
 	end
 	if #rigNames > 0 then
 		table.sort(rigNames)
@@ -536,7 +577,7 @@ local function preview()
 	end
 	ui:SetStatus(
 		`Previewing on {character.Name}{if #otherNames > 0 then ` (with {table.concat(otherNames, ", ")} for its Rig cues)` else ""}. `
-			.. "The VFX play by the clock from now, from where the rig stands; Moon's animation doesn't play along. "
+			.. `The VFX play by the clock from now, from where the rig stands; {if anim.Source == "Eclipse" then "Eclipse" else "Moon"}'s animation doesn't play along. `
 			.. "Click Stop preview to end it. The export's details are in the Output.",
 		"info"
 	)
@@ -549,7 +590,7 @@ local function dump()
 		return
 	end
 
-	local outline = SaveReader.dump(entry.Save)
+	local outline = readerFor(entry).dump(entry.Save)
 	print(outline)
 	ui:SetPreview(outline)
 	ui:SetStatus("Save outline printed to the Output window.", "info")
@@ -576,7 +617,13 @@ end
 
 ui.Buttons.Refresh.MouseButton1Click:Connect(function()
 	refreshSaves()
-	ui:SetStatus(`Found {#state.Saves} Moon Animator save(s).`, "info")
+	local eclipse = 0
+	for _, entry in state.Saves do
+		if entry.Source == "Eclipse" then
+			eclipse += 1
+		end
+	end
+	ui:SetStatus(`Found {#state.Saves - eclipse} Moon Animator save(s) and {eclipse} Eclipse Animator project(s).`, "info")
 end)
 
 ui.Buttons.Detect.MouseButton1Click:Connect(function()

@@ -1,7 +1,7 @@
 --[[
 	Sequence
-	Plays the VFX exported from a Moon Animator animation, in time with the animation, and cleans up
-	after them.
+	Plays the VFX exported from a Moon Animator or Eclipse Animator animation, in time with the
+	animation, and cleans up after them.
 
 		local Sequence = require(path.to.Sequence)
 		local MoonAnimation = require(path.to.MoonAnimation)
@@ -16,7 +16,8 @@
 		sequence:Stop() -- ends it now and removes everything it spawned
 
 	Sequence.new(animation, character, frameRate, tolerance)
-		animation  The exported table: Lifetime, CueTolerance, FrameRate and Cues.
+		animation  The exported table: Lifetime, CueTolerance, FrameRate and Cues, and Emitter when
+		           its VFX are emitted with a module of the game's (see Sequence.Emitter).
 		character  Who plays it. Offsets are from its HumanoidRootPart, and Parents are its parts.
 		frameRate  Optional. The rate the cue keys are in, in frames per second. Defaults to the
 		           table's FrameRate, or 1 when its keys are in seconds.
@@ -41,15 +42,22 @@
 
 	sequence:AddToCleaner(thing, lifetime)
 		Has the sequence clean up something a cue's Function made, like its VFX: an Instance is
-		destroyed, a connection disconnected, a function called (and a table's Destroy or Disconnect).
-		That's when the sequence stops, or after `lifetime` seconds (optional: the animation's Lifetime;
-		math.huge waits for the stop). Returns `thing`, so it can wrap where it's made:
+		destroyed, a connection disconnected, a function called, a thread cancelled (and a table's
+		Destroy or Disconnect). That's when the sequence stops, or after `lifetime` seconds
+		(optional: the animation's Lifetime; math.huge waits for the stop). Returns `thing`, so it
+		can wrap where it's made:
 			local highlight = self:AddToCleaner(Instance.new("Highlight"))
 
 	Sequence.Preload(animation, vfx)
 		Loads the images the cues' ImageLabels show (screen effects, and ones in the VFX) ahead of
 		time, so they don't pop in late. Sequence.new and Play do it too; call it earlier (when the
 		character spawns, say) to load them sooner. vfx is optional.
+
+	Sequence.Emitter(name)
+		The emitter an animation names, by its module and method: "ReplicatedStorage.Utilities.VFX:Emit"
+		emits each VFX with require(ReplicatedStorage.Utilities.VFX):Emit(vfx). The module is
+		required once, the first time, and never cloned. An animation without one is emitted with
+		Sequence.Emit: VFX Forge's emitter when the game has it.
 
 	Each cue's VFX is cloned from vfx, placed at its Offset, emitted, animated by its Keys, and removed
 	after the animation's Lifetime (or once its Keys finish, if that's later), or when the sequence
@@ -61,7 +69,11 @@
 		Rig       the other rig it plays on, from data.Rigs
 		Lifetime  seconds before its VFX is removed, instead of the animation's
 		Keys      keyframes it plays: { Property = { { seconds, value, easingStyle, easingDirection } } }.
-		          CFrame keys are offsets, like Offset.
+		          CFrame keys are offsets, like Offset. An Eclipse Bezier key's direction is its
+		          curve's two control points: { seconds, value, "Bezier", { x1, y1, x2, y2 } }.
+		EmitCount particles each of its ParticleEmitters gives off, instead of its own EmitCount
+		Emitter   the emitter its VFX is emitted with, instead of the animation's (see
+		          Sequence.Emitter); false when its Function emits it
 		Path      names leading from its VFX to what its Keys animate, e.g. { "A1", "PointLight" }
 		Screen    a screen effect to show instead of a VFX (a GUI class such as "ImageLabel", or a
 		          post effect such as "BlurEffect"), set up with Properties and animated by Keys.
@@ -69,7 +81,7 @@
 		          Mirrors }): Moon's vignette is four images tiling the screen. Keys play on the
 		          piece Path leads to (or the effect itself) and on the pieces that Mirror it.
 		Target    "Lighting" or "Camera": its Keys play on that instead, held for Hold seconds, then
-		          put back
+		          put back (a Screen is shown for its Hold seconds, too, when that's longer)
 		Function  function(self, effect, character, cue, data), run when it fires, after its VFX
 		          spawns. self is the sequence (for self:AddToCleaner), effect its VFX (or nil),
 		          character the one it plays on, data what was given to Play. If it errors, that's a
@@ -83,7 +95,7 @@ local RunService = game:GetService("RunService")
 local module = {}
 
 -- The Moon VFX Exporter replaces older versions of this module that it finds next to its exports.
-module.Version = 8
+module.Version = 11
 
 -- VFX play only on the client. On the server, Play and Spawn warn and do nothing.
 local function OnServer(Method)
@@ -120,12 +132,40 @@ local MoonEasing = {
 -- Roblox's EasingStyle and EasingDirection for each of Moon's easings, looked up once each.
 local Easings = {}
 
+-- An Eclipse Bezier ease: the curve from (0, 0) to (1, 1) through two control points, read as how
+-- far it has eased (y) at Alpha of the way (x).
+local function Bezier(Points, Alpha)
+	local X1, Y1, X2, Y2 = math.clamp(Points[1], 0, 1), Points[2], math.clamp(Points[3], 0, 1), Points[4]
+	-- Where along the curve x is Alpha: Newton's method, halving when it overshoots.
+	local Low, High, U = 0, 1, Alpha
+	for _ = 1, 24 do
+		local V = 1 - U
+		local Miss = 3 * V * V * U * X1 + 3 * V * U * U * X2 + U * U * U - Alpha
+		if math.abs(Miss) <= 1e-7 then
+			break
+		end
+		if Miss < 0 then
+			Low = U
+		else
+			High = U
+		end
+		local Slope = 3 * V * V * X1 + 6 * V * U * (X2 - X1) + 3 * U * U * (1 - X2)
+		local Guess = if Slope > 1e-9 then U - Miss / Slope else -1
+		U = if Guess > Low and Guess < High then Guess else (Low + High) / 2
+	end
+	local V = 1 - U
+	return 3 * V * V * U * Y1 + 3 * V * U * U * Y2 + U * U * U
+end
+
 local function Ease(Style, Direction, Alpha)
 	if Style == "Constant" then
 		return if Alpha >= 1 then 1 else 0
 	end
 	if Style == nil or Style == "Linear" then
 		return Alpha
+	end
+	if Style == "Bezier" then
+		return if type(Direction) == "table" and Alpha > 0 and Alpha < 1 then Bezier(Direction, Alpha) else Alpha
 	end
 
 	local Name = Style .. "/" .. (Direction or "In")
@@ -414,9 +454,10 @@ end
 
 -- Emits the effects in a spawned VFX. If the game has VFX Forge's emitter (shared.vfx), it's used,
 -- just as it is in Moon Animator. Otherwise ParticleEmitters use their EmitCount, EmitDelay and
--- EmitDuration attributes when they have them, and Sounds play. To use another emitter:
--- Sequence.Emit = yourEmit
-function module.Emit(Object)
+-- EmitDuration attributes when they have them (Count, when given, is how many particles each gives
+-- off instead), and Sounds play. An animation that names an Emitter is emitted with that instead
+-- (see Sequence.Emitter). To use another emitter everywhere: Sequence.Emit = yourEmit
+function module.Emit(Object, Count)
 	local Forge = shared and shared.vfx
 	if type(Forge) == "table" and type(Forge.emit) == "function" then
 		Forge.emit(Object)
@@ -428,7 +469,7 @@ function module.Emit(Object)
 
 	for _, Item in Items do
 		if Item:IsA("ParticleEmitter") then
-			local Count = tonumber(Item:GetAttribute("EmitCount")) or math.max(1, math.round(Item.Rate))
+			local Particles = Count or tonumber(Item:GetAttribute("EmitCount")) or math.max(1, math.round(Item.Rate))
 			local Delay = tonumber(Item:GetAttribute("EmitDelay")) or 0
 			local Duration = tonumber(Item:GetAttribute("EmitDuration"))
 
@@ -439,13 +480,64 @@ function module.Emit(Object)
 						Item.Enabled = false
 					end)
 				else
-					Item:Emit(Count)
+					Item:Emit(Particles)
 				end
 			end)
 		elseif Item:IsA("Sound") then
 			Item:Play()
 		end
 	end
+end
+
+-- The emitters animations name, once found: name -> function(object).
+local Emitters = {}
+
+-- An emitter by its name: a module's emit method, as "ReplicatedStorage.Utilities.VFX:Emit" (the
+-- ModuleScript from a service down, then : or . and the method, called the way the animation's
+-- events called it). The module is required once, the first time, not cloned. Returns a function
+-- that emits an object with it, or nil and why it can't be found.
+function module.Emitter(Name)
+	local Emitter = Emitters[Name]
+	if Emitter then
+		return Emitter
+	end
+
+	local Path, Separator, Method = string.match(Name, "^(.+)([:.])([%a_][%w_]*)$")
+	if not Path then
+		return nil, `it isn't a module and a method, like "ReplicatedStorage.Utilities.VFX:Emit"`
+	end
+	local Node = nil
+	for Step in string.gmatch(Path, "[^%.]+") do
+		if Node == nil then
+			local Ok, Service = pcall(game.GetService, game, Step)
+			Node = if Ok then Service else nil
+		else
+			Node = Node:FindFirstChild(Step)
+		end
+		if not Node then
+			break
+		end
+	end
+	if not (Node and Node:IsA("ModuleScript")) then
+		return nil, `there's no ModuleScript at {Path}`
+	end
+	local Ok, Loaded = pcall(require, Node)
+	if not Ok then
+		return nil, `requiring {Path} failed: {Loaded}`
+	end
+	if type(Loaded) ~= "table" or type(Loaded[Method]) ~= "function" then
+		return nil, `{Path} has no {Method} function`
+	end
+
+	Emitter = if Separator == ":"
+		then function(Object)
+			return Loaded[Method](Loaded, Object)
+		end
+		else function(Object)
+			return Loaded[Method](Object)
+		end
+	Emitters[Name] = Emitter
+	return Emitter
 end
 
 -- Sequences ------------------------------------------------------------------------------------
@@ -754,8 +846,8 @@ function Class:Destroy()
 	self:Stop()
 end
 
--- Destroys an Instance, disconnects a connection, calls a function, or calls a table's Destroy or
--- Disconnect.
+-- Destroys an Instance, disconnects a connection, calls a function, cancels a thread (one from
+-- task.delay, say), or calls a table's Destroy or Disconnect.
 local function CleanUp(Thing)
 	local Kind = typeof(Thing)
 	if Kind == "Instance" then
@@ -764,6 +856,8 @@ local function CleanUp(Thing)
 		Thing:Disconnect()
 	elseif Kind == "function" then
 		Thing()
+	elseif Kind == "thread" then
+		task.cancel(Thing)
 	elseif Kind == "table" then
 		if type(Thing.Destroy) == "function" then
 			Thing:Destroy()
@@ -864,7 +958,32 @@ function Class:_Place(Template, Cue, Character)
 		end
 	end
 
-	module.Emit(Effect)
+	-- Emitted with the emitter the cue or its animation names (a module of the game's, see
+	-- Sequence.Emitter), else with Sequence.Emit. Emitter = false leaves it to the cue's Function.
+	local Emitter = Cue.Emitter
+	if Emitter == nil then
+		Emitter = self.Animation.Emitter
+	end
+	if Emitter ~= false then
+		local Emit = nil
+		if type(Emitter) == "string" then
+			local Problem
+			Emit, Problem = module.Emitter(Emitter)
+			if not Emit then
+				self:_WarnOnce("Emitter " .. Emitter, `[Sequence] Can't emit with "{Emitter}" ({Problem}), so VFX are emitted with Sequence.Emit instead.`)
+			end
+		elseif type(Emitter) == "function" then
+			Emit = Emitter
+		end
+		if Emit then
+			local Ok, Problem = pcall(Emit, Effect)
+			if not Ok then
+				self:_WarnOnce("Emit " .. Effect.Name, `[Sequence] Emitting "{Effect.Name}" didn't work, so it's shown without emitting: {Problem}`)
+			end
+		else
+			module.Emit(Effect, Cue.EmitCount)
+		end
+	end
 
 	local StopKeys = nil
 	if Cue.Keys then

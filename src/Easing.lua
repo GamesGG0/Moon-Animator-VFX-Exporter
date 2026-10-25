@@ -166,6 +166,49 @@ local function hasCustomParams(params: { [string]: any }): boolean
 	return params.Overshoot ~= nil or params.Amplitude ~= nil or params.Period ~= nil
 end
 
+-- Where along a cubic Bézier from (0, 0) to (1, 1), with control points at x1 and x2 across, the
+-- curve is `t` of the way across (Newton's method, falling back to halving when it overshoots).
+function Easing.bezierParameter(t: number, x1: number, x2: number): number
+	if t <= 0 then
+		return 0
+	elseif t >= 1 then
+		return 1
+	end
+	x1, x2 = math.clamp(x1, 0, 1), math.clamp(x2, 0, 1)
+	local low, high, u = 0, 1, t
+	for _ = 1, 32 do
+		local v = 1 - u
+		local x = 3 * v * v * u * x1 + 3 * v * u * u * x2 + u * u * u
+		local miss = x - t
+		if math.abs(miss) <= 1e-9 then
+			break
+		end
+		if miss < 0 then
+			low = u
+		else
+			high = u
+		end
+		local slope = 3 * v * v * x1 + 6 * v * u * (x2 - x1) + 3 * u * u * (1 - x2)
+		local guess = if slope > 1e-9 then u - miss / slope else -1
+		u = if guess > low and guess < high then guess else (low + high) / 2
+	end
+	return u
+end
+
+-- A cubic Bézier ease like CSS's cubic-bezier(x1, y1, x2, y2): the curve from (0, 0) to (1, 1)
+-- through those control points, read as how far it has eased (y) at progress t (x). Eclipse
+-- Animator's Bezier keys ease this way.
+function Easing.bezier(t: number, x1: number, y1: number, x2: number, y2: number): number
+	if t <= 0 then
+		return 0
+	elseif t >= 1 then
+		return 1
+	end
+	local u = Easing.bezierParameter(t, x1, x2)
+	local v = 1 - u
+	return 3 * v * v * u * y1 + 3 * v * u * u * y2 + u * u * u
+end
+
 -- Moon's live functions are named like "QuadOut", "Linear", "Constant".
 local function fromMoon(moonFuncs: { [string]: any }?, style: string, direction: string): EaseFn?
 	if type(moonFuncs) ~= "table" then
@@ -191,11 +234,20 @@ local function fromMoon(moonFuncs: { [string]: any }?, style: string, direction:
 	return nil
 end
 
--- Returns a function mapping progress (0..1) to an eased alpha for the given Moon ease.
+-- Returns a function mapping progress (0..1) to an eased alpha for the given Moon ease, or for a
+-- "Bezier" one (Params.Bezier = { x1, y1, x2, y2 }, see Easing.bezier).
 function Easing.get(info: EaseInfo?, moonFuncs: { [string]: any }?): EaseFn
 	local style = (info and info.Type) or "Linear"
 	local params = (info and info.Params) or {}
 	local direction = tostring(params.Direction or "In")
+
+	local points = params.Bezier
+	if style == "Bezier" and type(points) == "table" then
+		local x1, y1, x2, y2 = points[1], points[2], points[3], points[4]
+		return function(t)
+			return Easing.bezier(t, x1, y1, x2, y2)
+		end
+	end
 
 	if not hasCustomParams(params) then
 		local live = fromMoon(moonFuncs, style, direction)
