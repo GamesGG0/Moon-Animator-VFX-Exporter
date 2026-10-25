@@ -15,6 +15,8 @@ MODULES = {
     "Sampler": "Sampler.lua",
     "RigPose": "RigPose.lua",
     "SaveReader": "SaveReader.lua",
+    "EclipseCurves": "EclipseCurves.lua",
+    "EclipseReader": "EclipseReader.lua",
     "Exporter": "Exporter.lua",
     "Formatter": "Formatter.lua",
     "Carryover": "Carryover.lua",

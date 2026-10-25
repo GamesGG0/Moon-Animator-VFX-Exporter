@@ -47,9 +47,16 @@ export type Cue = {
 	Animation: Animation?,
 	-- Code the event ran in Moon (other than emitting), for the cue's Function.
 	Code: string?,
+	-- An Eclipse event's code for when it ends, EndDelay seconds after it fires.
+	EndCode: string?,
+	EndDelay: number?,
+	-- What Eclipse gives event code, as locals the Function starts with: rig (the thing the event
+	-- is on), parameter, event and context, each { Name, Value } with Value as Lua source.
+	Locals: { { Name: string, Value: string } }?,
 	-- That code rewritten to run in game (see Exporter.adaptCode): what it used from the Moon scene
-	-- and its names in game, and whether it needs the cue's VFX or other rigs from data.Rigs.
-	Adapted: { Code: string, Uses: { { From: string, To: string } }, Effect: boolean, Rigs: { string } }?,
+	-- and its names in game, and whether it needs the cue's VFX or other rigs from data.Rigs. EndCode
+	-- is the end code rewritten the same way.
+	Adapted: { Code: string, EndCode: string?, Uses: { { From: string, To: string } }, Effect: boolean, Rigs: { string } }?,
 	-- Or, when it can't be, the scene objects it uses that the game won't have.
 	CodeMissing: { string }?,
 	-- The effects in Object the event emits, when it named them rather than all of Object; only
@@ -59,14 +66,24 @@ export type Cue = {
 	-- that lived in a prop's part, "Attachment" for one in a rig's attachment (the character in
 	-- game may not have that attachment), "AttachmentPart" for one in a prop's attachment.
 	Wrap: string?,
+	-- Particles each of its ParticleEmitters gives off, when an Eclipse emit sets how many.
+	EmitCount: number?,
+	-- How its VFX was emitted in the animation, when that was a module's emit method: the emitter
+	-- as the Sequence names one ("ReplicatedStorage.Utilities.VFX:Emit"), and the module (see
+	-- Exporter.findEmitCalls). The Sequence emits it the same way. false when its Function emits it
+	-- itself, so the Sequence doesn't as well.
+	Emitter: ({ Name: string, Module: string } | boolean)?,
+	-- Its VFX was emitted with VFX Forge, or by Eclipse: the Sequence's own emit does that.
+	DefaultEmit: boolean?,
 }
 
 -- Keyframes a cue replays: Kind "Animate" plays them on the spawned effect (or the
 -- instance at Path inside it, with CFrame keys relative to where the character stands if Origin);
 -- Kind "Lighting" plays them on Lighting, and "Camera" on the camera (its field of view).
+-- A key's Bezier is the control points of an Eclipse Bezier ease (Style "Bezier", see Easing.bezier).
 export type Animation = {
 	Kind: string,
-	Keys: { [string]: { { Time: number, Value: any, Style: string?, Direction: string? } } },
+	Keys: { [string]: { { Time: number, Value: any, Style: string?, Direction: string?, Bezier: { number }? } } },
 	Path: { string }?,
 	Origin: boolean?,
 	-- Seconds the last values hold before Lighting or the camera is put back: until the animation
@@ -80,11 +97,14 @@ export type Animation = {
 export type ScreenEffect = {
 	ClassName: string,
 	Properties: { [string]: any },
-	Keys: { [string]: { { Time: number, Value: any, Style: string?, Direction: string? } } },
+	Keys: { [string]: { { Time: number, Value: any, Style: string?, Direction: string?, Bezier: { number }? } } },
 	-- The effect's other pieces (see guiChildren): Moon's vignette is four images, say.
 	Children: { any }?,
 	-- Names leading from the effect to the keyed piece, when that's one of its pieces.
 	Path: { string }?,
+	-- Seconds to keep showing it, if that's longer than its keys: an Eclipse effect still showing
+	-- when its keys end shows until the animation does.
+	Hold: number?,
 }
 
 export type Result = {
@@ -442,6 +462,39 @@ local function inScene(inst: Instance): boolean
 		and inst:FindFirstAncestorWhichIsA("Camera") == nil
 end
 
+-- The parenthesis closing the one at `open` in `code`, past strings and comments; nil if there's none.
+local function closingParen(code: string, open: number): number?
+	local depth, i = 0, open
+	while i <= #code do
+		local c = string.sub(code, i, i)
+		if c == '"' or c == "'" then
+			local j = i + 1
+			while j <= #code do
+				local d = string.sub(code, j, j)
+				if d == "\\" then
+					j += 2
+				elseif d == c or d == "\n" then
+					break
+				else
+					j += 1
+				end
+			end
+			i = j
+		elseif string.sub(code, i, i + 1) == "--" then
+			i = string.find(code, "\n", i, true) or #code
+		elseif c == "(" then
+			depth += 1
+		elseif c == ")" then
+			depth -= 1
+			if depth == 0 then
+				return i
+			end
+		end
+		i += 1
+	end
+	return nil
+end
+
 -- Hands what event code makes to the sequence's cleaner (Sequence's self:AddToCleaner), so it goes
 -- when the sequence stops: a self:AddToCleaner(X) line is added after the code puts an instance it
 -- made into the world (X.Parent = ...), and after it makes a connection (X = ...:Connect(...)).
@@ -462,39 +515,6 @@ function Exporter.addCleanup(code: string): string
 			found = i
 		end
 		return found
-	end
-
-	-- The parenthesis closing the one at `open`, past strings and comments.
-	local function closing(open: number): number?
-		local depth, i = 0, open
-		while i <= #code do
-			local c = string.sub(code, i, i)
-			if c == '"' or c == "'" then
-				local j = i + 1
-				while j <= #code do
-					local d = string.sub(code, j, j)
-					if d == "\\" then
-						j += 2
-					elseif d == c or d == "\n" then
-						break
-					else
-						j += 1
-					end
-				end
-				i = j
-			elseif string.sub(code, i, i + 1) == "--" then
-				i = string.find(code, "\n", i, true) or #code
-			elseif c == "(" then
-				depth += 1
-			elseif c == ")" then
-				depth -= 1
-				if depth == 0 then
-					return i
-				end
-			end
-			i += 1
-		end
-		return nil
 	end
 
 	local after: { [number]: { { Name: string, Indent: string } } } = {}
@@ -536,7 +556,7 @@ function Exporter.addCleanup(code: string): string
 			init = e + 1
 			-- A plain variable, not a field (self.connection = ...).
 			if s == 1 or string.match(string.sub(code, s - 1, s - 1), "[%s;]") then
-				local close = closing(e)
+				local close = closingParen(code, e)
 				if close then
 					local first = lines[lineAt(s)]
 					cleanAfter(lineAt(close), name, string.match(first, "^%s*") or "")
@@ -609,65 +629,339 @@ function Exporter.adaptCode(code: string, names: { [Instance]: string }): (strin
 	return code, used
 end
 
--- Calls in event code that emit VFX: VFX Forge's `shared.vfx.emit(a, b, ...)`, and Part_Icles'
--- `Part_Icles:AbsoluteEmit(a)`.
-local EMIT_CALLS = {
-	"shared%s*%.%s*vfx%s*%.%s*[Ee]mit%s*%(",
-	":%s*AbsoluteEmit%s*%(",
-}
+-- Whether code uses `name` as a variable of its own (not as a field, like part.rig).
+local function usesName(code: string, name: string): boolean
+	local init = 1
+	while true do
+		local s, e = string.find(code, `%f[%w_]{name}%f[^%w_]`, init)
+		if not s then
+			return false
+		end
+		local before = string.match(string.sub(code, 1, s - 1), "(%S)%s*$")
+		if before ~= "." and before ~= ":" then
+			return true
+		end
+		init = e + 1
+	end
+end
 
--- What the emit calls in event code emit, in order, and how many calls there are. People put these
--- events on any item (even Moon's Subtitles), so the event's item says nothing about what's
--- emitted. A path that isn't in the place emits nothing, as in Moon.
-function Exporter.findEmitTargets(code: string): ({ Instance }, number)
-	-- Each call's arguments: from after its "(" to its matching ")". Quoted names can hold
-	-- parentheses.
-	local calls = {}
-	for _, pattern in EMIT_CALLS do
-		local init = 1
-		while true do
-			local _, open = string.find(code, pattern, init)
-			if not open then
-				break
+-- `require(X:Clone())` written as `require(X)`. Moon runs event code in Studio over and over, so
+-- code made for it often clones a module to get a fresh copy each time; in game that makes and
+-- runs a new copy of the module on every cue, where one, required once, is what's wanted.
+function Exporter.withoutClonedRequires(code: string): string
+	local out, init = {}, 1
+	while true do
+		local s, open = string.find(code, "%f[%w_]require%s*%(", init)
+		if not s then
+			break
+		end
+		local close = closingParen(code, open)
+		if not close then
+			break
+		end
+		local inner = string.sub(code, open + 1, close - 1)
+		local module = string.match(inner, "^%s*(.-)%s*:%s*Clone%s*%(%s*%)%s*$")
+		table.insert(out, string.sub(code, init, open))
+		table.insert(out, module or inner)
+		table.insert(out, ")")
+		init = close + 1
+	end
+	table.insert(out, string.sub(code, init))
+	return table.concat(out)
+end
+
+-- How deep in blocks (if, loops, functions) `code` is at `pos`, past strings and comments.
+local function blockDepth(code: string, pos: number): number
+	local depth, i = 0, 1
+	while i < pos do
+		local c = string.sub(code, i, i)
+		if c == '"' or c == "'" then
+			local j = i + 1
+			while j <= #code and string.sub(code, j, j) ~= c and string.sub(code, j, j) ~= "\n" do
+				j += if string.sub(code, j, j) == "\\" then 2 else 1
 			end
-
-			local depth, i, quote = 1, open + 1, nil
-			while i <= #code and depth > 0 do
-				local c = string.sub(code, i, i)
-				if quote then
-					if c == "\\" then
-						i += 1
-					elseif c == quote then
-						quote = nil
-					end
-				elseif c == '"' or c == "'" then
-					quote = c
-				elseif c == "(" then
-					depth += 1
-				elseif c == ")" then
-					depth -= 1
-				end
-				i += 1
+			i = j + 1
+		elseif string.sub(code, i, i + 1) == "--" then
+			i = (string.find(code, "\n", i, true) or #code) + 1
+		elseif string.match(c, "[%a_]") then
+			local word = string.match(code, "^[%w_]+", i) :: string
+			if word == "then" or word == "do" or word == "function" or word == "repeat" then
+				depth += 1
+			elseif word == "end" or word == "until" or word == "elseif" then
+				depth -= 1
 			end
-
-			table.insert(calls, { From = open + 1, Close = i - 1 })
-			init = i
+			i += #word
+		else
+			i += 1
 		end
 	end
+	return depth
+end
+
+-- A call in event code that emits VFX (see Exporter.findEmitCalls).
+export type EmitCall = {
+	-- What it emits that's in the place.
+	Targets: { Instance },
+	-- For an emit method of a module the code requires: the module's place in the game and the
+	-- method, as the Sequence names an emitter ("ReplicatedStorage.Utilities.VFX:Emit"), and the
+	-- module's.
+	Emitter: { Name: string, Module: string }?,
+	-- Where the call is in the code, and whether the Sequence's own emit stands in for it in game:
+	-- VFX Forge's always does; a module's does when the call just emits one thing, isn't inside an
+	-- if, a loop or a function, and the code uses the module for nothing else.
+	From: number,
+	To: number,
+	Removable: boolean,
+}
+
+local FORGE_CALL = "shared%s*%.%s*vfx%s*%.%s*[Ee]mit%s*%("
+
+-- The calls in event code that emit VFX, in order: VFX Forge's `shared.vfx.emit(a, b, ...)`, and
+-- an emit method of a module the code requires, as in
+--   local VFX = require(game.ReplicatedStorage.Utilities.VFX)
+--   VFX:Emit(workspace.Slash)
+-- (Part_Icles' `Part_Icles:AbsoluteEmit(a)` is one). People put these events on any item (even
+-- Moon's Subtitles), so the event's item says nothing about what's emitted. A module's method only
+-- counts when what it's given is a path in the place, or one that's missing from it.
+function Exporter.findEmitCalls(code: string): { EmitCall }
+	local calls: { EmitCall } = {}
+
+	-- What a call's arguments name: the instances there, and whether they're a path at all. The
+	-- code before the call is read too, for the locals they use.
+	local function named(open: number, close: number): ({ Instance }, boolean)
+		local prefix = string.sub(code, 1, close - 1)
+		local isPath = false
+		for _, path in pathsInCode(prefix) do
+			if path.At > open then
+				isPath = true
+			end
+		end
+		return Exporter.findInstancesInCode(prefix, open + 1, true), isPath
+	end
+
+	-- Whether the call from `from` to `to` is a statement of its own.
+	local function alone(from: number, to: number): boolean
+		local before = string.match(string.sub(code, 1, from - 1), "([^\n]*)$") or ""
+		local after = string.match(code, "^[^\n]*", to + 1) or ""
+		return not string.find(before, "%S") and (not string.find(after, "%S") or string.match(after, "^%s*;?%s*%-%-") ~= nil or string.match(after, "^%s*;%s*$") ~= nil)
+	end
+	local function oneArgument(open: number, close: number): boolean
+		local depth, i = 0, open + 1
+		while i < close do
+			local c = string.sub(code, i, i)
+			if c == '"' or c == "'" then
+				local j = i + 1
+				while j < close and string.sub(code, j, j) ~= c do
+					j += if string.sub(code, j, j) == "\\" then 2 else 1
+				end
+				i = j
+			elseif c == "(" or c == "{" or c == "[" then
+				depth += 1
+			elseif c == ")" or c == "}" or c == "]" then
+				depth -= 1
+			elseif c == "," and depth == 0 then
+				return false
+			end
+			i += 1
+		end
+		return true
+	end
+
+	local init = 1
+	while true do
+		local s, open = string.find(code, FORGE_CALL, init)
+		if not s then
+			break
+		end
+		local close = closingParen(code, open) or #code
+		table.insert(calls, { Targets = (named(open, close)), From = s, To = close, Removable = true })
+		init = close + 1
+	end
+
+	-- A module's emit method: through a local holding the module, or straight on require(...).
+	-- `module` is the ModuleScript, when it's in the place. The Sequence can only stand in for the
+	-- call when it is, and is somewhere it can find it by name.
+	local function moduleCall(from: number, module: Instance?, rest: number)
+		local _, open, separator, method = string.find(code, "^%s*([:.])%s*([%a_][%w_]*)%s*%(", rest)
+		if not open or not string.find(string.lower(method), "emit", 1, true) then
+			return
+		end
+		local close = closingParen(code, open)
+		if not close then
+			return
+		end
+		local targets, isPath = named(open, close)
+		if not isPath then
+			return
+		end
+		-- Its place as names from a service down, each without a "." or ":" (the Sequence splits on them).
+		local place = nil
+		if module and module:IsA("ModuleScript") then
+			local names, node = {}, module :: Instance?
+			while node and node.Parent and node.Parent ~= game do
+				table.insert(names, 1, node.Name)
+				node = node.Parent
+			end
+			if node and node.Parent == game then
+				table.insert(names, 1, node.Name)
+				local text = table.concat(names, ".")
+				local _, dots = string.gsub(text, "%.", "")
+				if dots == #names - 1 and not string.find(text, ":", 1, true) then
+					place = text
+				end
+			end
+		end
+		local findable = place ~= nil
+		table.insert(calls, {
+			Targets = targets,
+			Emitter = if findable then { Name = `{place}{separator}{method}`, Module = place :: string } else nil,
+			From = from,
+			To = close,
+			Removable = findable and alone(from, close) and oneArgument(open, close) and blockDepth(code, from) == 0,
+		})
+	end
+
+	local modules = {}
+	init = 1
+	while true do
+		local s, open = string.find(code, "%f[%w_]require%s*%(", init)
+		if not s then
+			break
+		end
+		local close = closingParen(code, open)
+		if not close then
+			break
+		end
+		-- The module it requires (through any locals before it, and past a :Clone()).
+		local module = Exporter.findInstancesInCode(string.sub(code, 1, close - 1), open + 1, true)[1]
+		local name = string.match(string.sub(code, 1, s - 1), "local%s+([%a_][%w_]*)%s*=%s*$")
+		if name then
+			modules[name] = module or false
+		else
+			moduleCall(s, module, close + 1)
+		end
+		init = close + 1
+	end
+	for name, module in modules do
+		local first, uses = #calls + 1, 0
+		init = 1
+		while true do
+			local s, e = string.find(code, `%f[%w_]{name}%f[^%w_]`, init)
+			if not s then
+				break
+			end
+			local before = string.sub(code, s - 1, s - 1)
+			if before ~= "." and before ~= ":" and not string.match(string.sub(code, 1, s - 1), "local%s+$") then
+				uses += 1
+				moduleCall(s, module or nil, e + 1)
+			end
+			init = e + 1
+		end
+		-- Code that does more with the module (Part_Icles:Activate(), say) keeps all of it.
+		if uses > #calls - first + 1 then
+			for i = first, #calls do
+				calls[i].Removable = false
+			end
+		end
+	end
+
 	table.sort(calls, function(a, b)
 		return a.From < b.From
 	end)
+	return calls
+end
 
-	-- The code before a call is read too, for the locals its arguments use.
+-- What the emit calls in event code emit, in order, and how many calls there are (see
+-- Exporter.findEmitCalls). A path that isn't in the place emits nothing, as in Moon.
+function Exporter.findEmitTargets(code: string): ({ Instance }, number)
+	local calls = Exporter.findEmitCalls(code)
 	local targets = {}
 	for _, call in calls do
-		for _, inst in Exporter.findInstancesInCode(string.sub(code, 1, call.Close - 1), call.From, true) do
+		for _, inst in call.Targets do
 			if not table.find(targets, inst) then
 				table.insert(targets, inst)
 			end
 		end
 	end
 	return targets, #calls
+end
+
+-- Whether a local's value can go without anything else changing: a module, or an instance path.
+local QUIET_METHODS = { GetService = true, WaitForChild = true, FindFirstChild = true, FindFirstChildOfClass = true, FindFirstChildWhichIsA = true, Clone = true }
+local function isQuiet(value: string): boolean
+	if string.match(value, "^require%s*%(") then
+		return true
+	end
+	if not (string.match(value, "^game%f[^%w_]") or string.match(value, "^workspace%f[^%w_]")) then
+		return false
+	end
+	local bare = string.gsub(string.gsub(value, '"[^"]*"', '""'), "'[^']*'", "''")
+	local calls = select(2, string.gsub(bare, "%(", ""))
+	local methods = 0
+	for method in string.gmatch(bare, ":%s*([%a_][%w_]*)%s*%(") do
+		if not QUIET_METHODS[method] then
+			return false
+		end
+		methods += 1
+	end
+	return calls == methods
+end
+
+-- Event code without the emit calls the Sequence's own emit stands in for (see
+-- Exporter.findEmitCalls), or the locals only they used: the rest of what it does, or nil when
+-- that's nothing.
+function Exporter.withoutEmitCalls(code: string, calls: { EmitCall }): string?
+	-- The names the calls used, for the locals that may go with them.
+	local used: { [string]: boolean } = {}
+	local removable = {}
+	for _, call in calls do
+		if call.Removable then
+			table.insert(removable, call)
+			for name in string.gmatch(string.sub(code, call.From, call.To), "[%a_][%w_]*") do
+				used[name] = true
+			end
+		end
+	end
+	table.sort(removable, function(a, b)
+		return a.From > b.From
+	end)
+	for _, call in removable do
+		local after = string.match(code, "^%s*;", call.To + 1) or ""
+		code = string.sub(code, 1, call.From - 1) .. string.sub(code, call.To + 1 + #after)
+	end
+
+	-- A local only those used, set to a module or a path, goes too (and so on, for its value).
+	local lines = string.split(code, "\n")
+	repeat
+		local changed = false
+		for i, line in lines do
+			local name, value = string.match(line, "^%s*local%s+([%a_][%w_]*)%s*=%s*(.-)%s*;?%s*$")
+			if name and used[name] then
+				value = string.gsub(value, "%s*%-%-[^\"']*$", "")
+				local others = table.clone(lines)
+				table.remove(others, i)
+				if isQuiet(value) and not usesName(table.concat(others, "\n"), name) then
+					for other in string.gmatch(value, "[%a_][%w_]*") do
+						used[other] = true
+					end
+					lines = others
+					changed = true
+					break
+				end
+			end
+		end
+	until not changed
+
+	-- Blank lines where the calls were go, and so does code that's only comments now.
+	local kept = {}
+	for _, line in lines do
+		if string.find(line, "%S") or (kept[#kept] and string.find(kept[#kept], "%S")) then
+			table.insert(kept, line)
+		end
+	end
+	local rest = string.gsub(table.concat(kept, "\n"), "%s+$", "")
+	local content = string.gsub(string.gsub(rest, "%-%-%[(=*)%[.-%]%1%]", ""), "%-%-[^\n]*", "")
+	return if string.find(content, "%S") then rest else nil
 end
 
 local function pathLeaf(item: SaveReader.Item): string
@@ -1077,8 +1371,11 @@ local function className(item: SaveReader.Item): string
 end
 
 -- Moon's screen effects: anything in its MoonAnimatorEffects GUI except Subtitles, and post
--- effects (blur, color correction, bloom...) wherever they are.
+-- effects (blur, color correction, bloom...) wherever they are. Eclipse's are its effect objects.
 local function isScreenEffect(item: SaveReader.Item): boolean
+	if item.ItemType == "ScreenEffect" then
+		return true
+	end
 	local inst = item.Instance
 	if inst then
 		if inst:IsA("PostEffect") then
@@ -1128,6 +1425,7 @@ local function relativeKeys(item: SaveReader.Item, first: number, fps: number, t
 				Value = if transform then transform(property, key, at) else key.Value,
 				Style = ease and ease.Type,
 				Direction = ease and ease.Params and ease.Params.Direction,
+				Bezier = ease and ease.Params and ease.Params.Bezier,
 			})
 		end
 		keys[property] = list
@@ -1247,6 +1545,399 @@ function Exporter.screenCue(item: SaveReader.Item, fps: number): Cue?
 	}
 end
 
+-- Eclipse's screen effects -----------------------------------------------------------------------
+
+-- Eclipse Animator's screen effects are models it calls effect objects, drawn as overlays: a
+-- vignette (four images tiling the screen), a cover, impact frames, letterbox bars. Each becomes
+-- that overlay in a Screen cue, its keys turned into the overlay's properties at every frame (then
+-- thinned out, see framesToKeys), from when it starts showing.
+
+local VIGNETTE_IMAGES = { "82598366942133", "106569976373084", "92678033024080", "100796043365951" }
+-- Older images Eclipse swaps for those.
+local REPLACED_IMAGES = { ["4764912210"] = 1, ["4764912960"] = 2, ["4764912557"] = 3, ["4764912732"] = 4 }
+-- Each vignette image's place on a 1920 by 1080 screen: x, y, width, height.
+local VIGNETTE_TILES = {
+	{ 0, 0, 1024, 1024 },
+	{ 1024, 0, 896, 1024 },
+	{ 0, 1024, 1024, 56 },
+	{ 1024, 1024, 896, 56 },
+}
+
+-- The numbers a value is made of, to check a straight line from one key to the next follows it.
+-- nil for values that don't blend.
+local function numbersOf(value: any): { number }?
+	local kind = typeof(value)
+	if kind == "number" then
+		return { value }
+	elseif kind == "Color3" then
+		return { value.R, value.G, value.B }
+	elseif kind == "UDim2" then
+		return { value.X.Scale, value.X.Offset, value.Y.Scale, value.Y.Offset }
+	elseif kind == "Vector2" then
+		return { value.X, value.Y }
+	end
+	return nil
+end
+
+-- A property's value at every frame, as cue keys (seconds from `first`): a value that blends keeps
+-- the frames a straight line from the last kept one doesn't follow, one that doesn't (a string, a
+-- boolean) the frames it changes on, held until the next.
+local function framesToKeys(samples: { { Frame: number, Value: any } }, first: number, fps: number): { any }
+	local function key(sample, style: string?)
+		return { Time = math.round((sample.Frame - first) / fps * 10000) / 10000, Value = sample.Value, Style = style }
+	end
+	local numbers = {}
+	for i, sample in samples do
+		numbers[i] = numbersOf(sample.Value)
+	end
+
+	if not numbers[1] then
+		local keys = { key(samples[1], "Constant") }
+		for i = 2, #samples do
+			if samples[i].Value ~= samples[i - 1].Value then
+				table.insert(keys, key(samples[i], "Constant"))
+			end
+		end
+		return keys
+	end
+
+	local tolerance = {}
+	for c = 1, #numbers[1] do
+		local low, high = math.huge, -math.huge
+		for _, list in numbers do
+			low, high = math.min(low, list[c]), math.max(high, list[c])
+		end
+		tolerance[c] = math.max(1e-4, (high - low) * 2e-3)
+	end
+	local function fits(from: number, to: number): boolean
+		for i = from + 1, to - 1 do
+			local alpha = (samples[i].Frame - samples[from].Frame) / (samples[to].Frame - samples[from].Frame)
+			for c, value in numbers[i] do
+				local line = numbers[from][c] + (numbers[to][c] - numbers[from][c]) * alpha
+				if math.abs(value - line) > tolerance[c] then
+					return false
+				end
+			end
+		end
+		return true
+	end
+
+	local keys = { key(samples[1]) }
+	local anchor = 1
+	for i = 3, #samples do
+		if not fits(anchor, i) then
+			anchor = i - 1
+			table.insert(keys, key(samples[anchor]))
+		end
+	end
+	if #samples > 1 then
+		table.insert(keys, key(samples[#samples]))
+	end
+	return keys
+end
+
+-- The share of the screen's height a letterbox bar covers, from its part in front of Eclipse's
+-- camera: the bars sit either side of the middle of the view, which is `height` tall there.
+local function barCover(top: BasePart, bottom: BasePart, model: Instance, size: number, isTop: boolean): number
+	local gap = top.CFrame:ToObjectSpace(bottom.CFrame).Y
+	local depth, fov = model:GetAttribute("EffectReferenceDepth"), model:GetAttribute("EffectReferenceFOV")
+	local height = if type(depth) == "number" and type(fov) == "number"
+		then 2 * depth * math.tan(math.rad(fov) / 2)
+		else (math.abs(gap) + top.Size.Y) / 1.5
+	if height <= 0 then
+		return 0
+	end
+	local inner = if isTop then -size / 2 - gap / 2 else gap + size / 2 - gap / 2
+	return math.clamp(if isTop then (height / 2 - inner) / height else (inner + height / 2) / height, 0, 1)
+end
+
+-- The cues for one of Eclipse's effect objects: one (for impact frames, one per image shown), or
+-- none when it never shows. `length` is the animation's last frame.
+function Exporter.eclipseScreenCues(item: SaveReader.Item, fps: number, length: number, warnings: { string }): { Cue }
+	local model = item.Instance
+	local kind = if model then model:GetAttribute("EffectKind") else nil
+	local name = pathLeaf(item)
+	if kind == "Camera Shake" then
+		table.insert(warnings, `{name} is an Eclipse camera shake, which isn't exported yet.`)
+		return {}
+	end
+
+	local defaults: { [string]: any } = {
+		Color = Color3.new(0, 0, 0),
+		Transparency = 1,
+		Size = Vector2.new(1, 1),
+		Position = Vector2.new(0, 0),
+		Rotation = 0,
+		Enabled = true,
+		Gradient = false,
+		Color2 = Color3.new(1, 1, 1),
+		GradientRotation = 90,
+		Image = "",
+	}
+	-- An effect property at a frame: from its keys, else as the effect is.
+	local function at(id: string, frame: number): any
+		local track = item.Tracks[id]
+		if track and #track > 0 then
+			return Sampler.sample(track, frame)
+		end
+		local value = if model then model:GetAttribute("Effect" .. id) else nil
+		if value == nil then
+			value = item.Defaults[id]
+		end
+		return if value == nil then defaults[id] else value
+	end
+	local function shown(frame: number): number
+		return if at("Enabled", frame) == false then 1 else math.clamp(at("Transparency", frame), 0, 1)
+	end
+	local function colour(frame: number): Color3
+		return if at("Gradient", frame) == true then Color3.new(1, 1, 1) else at("Color", frame)
+	end
+
+	-- From the effect's first key to its last; from the start if it already shows then, and on to
+	-- the end of the animation if it still shows when its keys end.
+	local first, last = math.huge, -math.huge
+	for _, track in item.Tracks do
+		if #track > 0 then
+			first, last = math.min(first, track[1].Time), math.max(last, track[#track].Time)
+		end
+	end
+	if first == math.huge then
+		first, last = 0, 0
+	end
+	if shown(first) < 1 then
+		first = 0
+	end
+	local function holdFrom(start: number, finish: number): number?
+		return if shown(finish) < 1 and length > finish then math.round((length - start) / fps * 1000) / 1000 else nil
+	end
+
+	-- One overlay from `start` to `finish`: its root's look, its pieces, the piece its keys play on,
+	-- and its keyed properties at a frame.
+	local function overlay(start: number, finish: number, class: string, properties: { [string]: any }, children: { any }?, path: { string }?, keyed: (number) -> { [string]: any }, hold: number?): Cue?
+		local samples = {}
+		local visible = false
+		for frame = start, math.max(start, finish) do
+			if shown(frame) < 1 then
+				visible = true
+			end
+			for property, value in keyed(frame) do
+				samples[property] = samples[property] or {}
+				table.insert(samples[property], { Frame = frame, Value = value })
+			end
+		end
+		if not visible then
+			return nil
+		end
+
+		local keys = {}
+		for property, list in samples do
+			local changes = false
+			for _, sample in list do
+				if sample.Value ~= list[1].Value then
+					changes = true
+				end
+			end
+			if changes then
+				keys[property] = framesToKeys(list, start, fps)
+			end
+		end
+		if model and (item.Tracks.Color or item.Tracks.Color2) and at("Gradient", start) == true then
+			table.insert(warnings, `{name}'s colour is keyed while it's a gradient, which isn't exported; it keeps its first colours.`)
+		end
+		return {
+			Frame = start,
+			Effect = name,
+			Offset = CFrame.new(),
+			Notes = if model then {} else { `{name} isn't in the place, so its look is Eclipse's default` },
+			Screen = { ClassName = class, Properties = properties, Keys = keys, Children = children, Path = path, Hold = hold },
+		}
+	end
+
+	-- What every overlay has: centred, sized and turned as the effect is, with its gradient.
+	local function frame(start: number): ({ [string]: any }, { any })
+		local size, position = at("Size", start), at("Position", start)
+		local properties: { [string]: any } = {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Size = UDim2.fromScale(math.max(0.01, size.X), math.max(0.01, size.Y)),
+			Position = UDim2.fromScale(0.5 + position.X, 0.5 + position.Y),
+			Rotation = at("Rotation", start),
+		}
+		local children = {}
+		if at("Gradient", start) == true then
+			table.insert(children, {
+				Name = "EffectGradient",
+				ClassName = "UIGradient",
+				Properties = { Color = ColorSequence.new(at("Color", start), at("Color2", start)), Rotation = at("GradientRotation", start) },
+			})
+		end
+		return properties, children
+	end
+	local function placed(f: number): { [string]: any }
+		local size, position = at("Size", f), at("Position", f)
+		return {
+			Size = UDim2.fromScale(math.max(0.01, size.X), math.max(0.01, size.Y)),
+			Position = UDim2.fromScale(0.5 + position.X, 0.5 + position.Y),
+			Rotation = at("Rotation", f),
+		}
+	end
+
+	if kind == "Vignette" then
+		local properties, children = frame(first)
+		properties.Size, properties.Position, properties.Rotation = UDim2.fromScale(1, 1), UDim2.fromScale(0.5, 0.5), 0
+		for i, tile in VIGNETTE_TILES do
+			local id = tostring(if model then model:GetAttribute("VignetteImage" .. i) or VIGNETTE_IMAGES[i] else VIGNETTE_IMAGES[i])
+			id = if REPLACED_IMAGES[id] then VIGNETTE_IMAGES[REPLACED_IMAGES[id]] else id
+			table.insert(children, {
+				Name = "Tile" .. i,
+				ClassName = "ImageLabel",
+				Mirrors = i > 1,
+				Properties = {
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = UDim2.fromScale((tile[1] + tile[3] / 2) / 1920, (tile[2] + tile[4] / 2) / 1080),
+					Size = UDim2.fromScale(tile[3] / 1920, tile[4] / 1080),
+					BackgroundTransparency = 1,
+					Image = "rbxassetid://" .. id,
+					ImageColor3 = colour(first),
+					ImageTransparency = shown(first),
+				},
+			})
+		end
+		local cue = overlay(first, last, "CanvasGroup", properties, children, { "Tile1" }, function(f)
+			return { ImageTransparency = shown(f), ImageColor3 = colour(f) }
+		end, holdFrom(first, last))
+		return if cue then { cue } else {}
+	elseif kind == "Screen Cover" then
+		local properties, children = frame(first)
+		properties.BackgroundTransparency, properties.BackgroundColor3 = shown(first), colour(first)
+		local cue = overlay(first, last, "CanvasGroup", properties, children, nil, function(f)
+			local look = placed(f)
+			look.BackgroundTransparency, look.BackgroundColor3 = shown(f), colour(f)
+			return look
+		end, holdFrom(first, last))
+		return if cue then { cue } else {}
+	elseif kind == "Impact Frames" then
+		-- An overlay for each stretch one image shows for: Eclipse's built-in White, Black, Burst and
+		-- Inverse frames, or an image asset.
+		local cues = {}
+		local function piece(image: string): { any }
+			local inverse, white = image == "builtin:Inverse", image == "builtin:White"
+			local properties: { [string]: any } = { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ClipsDescendants = true }
+			local inside = {}
+			if string.sub(image, 1, 8) == "builtin:" then
+				properties.BackgroundTransparency = 0
+				properties.BackgroundColor3 = if white or inverse then Color3.new(1, 1, 1) else Color3.new(0, 0, 0)
+				if image == "builtin:Burst" or inverse then
+					local ray = if inverse then Color3.new(0, 0, 0) else Color3.new(1, 1, 1)
+					for n = 0, 23 do
+						table.insert(inside, {
+							Name = "Ray",
+							ClassName = "Frame",
+							Properties = {
+								AnchorPoint = Vector2.new(0.5, 0.5),
+								Position = UDim2.fromScale(0.5, 0.5),
+								Size = UDim2.fromScale(2, if n % 3 == 0 then 0.045 else 0.012),
+								Rotation = n * 15 + 7,
+								BorderSizePixel = 0,
+								BackgroundColor3 = ray,
+							},
+						})
+					end
+					table.insert(inside, {
+						Name = "Core",
+						ClassName = "Frame",
+						Properties = {
+							AnchorPoint = Vector2.new(0.5, 0.5),
+							Position = UDim2.fromScale(0.5, 0.5),
+							Size = UDim2.fromScale(0.18, 0.3),
+							BorderSizePixel = 0,
+							BackgroundColor3 = properties.BackgroundColor3,
+						},
+						Children = { { Name = "UICorner", ClassName = "UICorner", Properties = { CornerRadius = UDim.new(1, 0) } } },
+					})
+				end
+			else
+				local id = string.match(image, "^%s*(%d+)%s*$") or string.match(image, "^rbxassetid://(%d+)$")
+				table.insert(inside, {
+					Name = "Picture",
+					ClassName = "ImageLabel",
+					Properties = {
+						Size = UDim2.fromScale(1, 1),
+						BackgroundTransparency = 1,
+						Image = if id then "rbxassetid://" .. id else image,
+						ScaleType = Enum.ScaleType.Stretch,
+					},
+				})
+			end
+			return { { Name = "ImpactImage", ClassName = "CanvasGroup", Properties = properties, Children = if #inside > 0 then inside else nil } }
+		end
+
+		local stretchStart, image = first, at("Image", first)
+		local function finishStretch(finish: number, final: boolean)
+			if image ~= "" then
+				local properties, children = frame(stretchStart)
+				properties.GroupTransparency, properties.GroupColor3 = shown(stretchStart), colour(stretchStart)
+				for _, child in piece(image) do
+					table.insert(children, child)
+				end
+				local hold = if final then holdFrom(stretchStart, finish) else math.round((finish - stretchStart) / fps * 1000) / 1000
+				local cue = overlay(stretchStart, finish, "CanvasGroup", properties, children, nil, function(f)
+					local look = placed(f)
+					look.GroupTransparency, look.GroupColor3 = shown(f), colour(f)
+					return look
+				end, hold)
+				if cue then
+					table.insert(cues, cue)
+				end
+			end
+		end
+		for f = first + 1, math.max(first, last) do
+			local now = at("Image", f)
+			if now ~= image then
+				finishStretch(f, false)
+				stretchStart, image = f, now
+			end
+		end
+		finishStretch(math.max(first, last), true)
+		return cues
+	elseif kind == "Letterbox" then
+		local top = model and model:FindFirstChild("Top")
+		local bottom = model and model:FindFirstChild("Bottom")
+		if not (model and model:GetAttribute("EffectStyle") == "Solid" and top and bottom and top:IsA("BasePart") and bottom:IsA("BasePart")) then
+			table.insert(warnings, `{name} is an Eclipse letterbox made of effects, which isn't exported yet (solid ones are).`)
+			return {}
+		end
+		if item.Tracks.TopSize or item.Tracks.BottomSize then
+			table.insert(warnings, `{name}'s bar sizes are keyed, which isn't exported; its bars keep the size they have now.`)
+		end
+		local function bar(barName: string, isTop: boolean, f: number): any
+			local part = (if isTop then top else bottom) :: BasePart
+			return {
+				Name = barName,
+				ClassName = "Frame",
+				Mirrors = not isTop,
+				Properties = {
+					AnchorPoint = Vector2.new(0, if isTop then 0 else 1),
+					Position = UDim2.fromScale(0, if isTop then 0 else 1),
+					Size = UDim2.fromScale(1, barCover(top :: BasePart, bottom :: BasePart, model :: Instance, part.Size.Y, isTop)),
+					BorderSizePixel = 0,
+					BackgroundColor3 = at("Color", f),
+					BackgroundTransparency = shown(f),
+				},
+			}
+		end
+		local properties = { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0 }
+		local cue = overlay(first, last, "Frame", properties, { bar("Top", true, first), bar("Bottom", false, first) }, { "Top" }, function(f)
+			return { BackgroundTransparency = shown(f), BackgroundColor3 = at("Color", f) }
+		end, holdFrom(first, last))
+		return if cue then { cue } else {}
+	end
+
+	table.insert(warnings, `{name} is an Eclipse effect of a kind this exporter doesn't know ({tostring(kind)}), so it's left out.`)
+	return {}
+end
+
 local MAX_FRAME_RATE = 960
 -- Events at the very same moment must be nudged a frame apart; at this rate that's ~4 ms.
 local NUDGE_FRAME_RATE = 240
@@ -1330,9 +2021,14 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 	end
 
 	local cues = {}
-	local warnings = {}
+	local warnings = table.clone(anim.Warnings or {})
 	local skipped = {}
 	local eventCount = 0
+	-- Where the animation was made, for what's said about it.
+	local eclipse = anim.Source == "Eclipse"
+	local tool = if eclipse then "Eclipse" else "Moon"
+	-- The file's frame rate.
+	local fps = if anim.FPS > 0 then anim.FPS else 60
 
 	local function skip(item: SaveReader.Item)
 		local name = pathLeaf(item)
@@ -1436,11 +2132,21 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 	-- An event's code from Moon, kept on its cue. It's also rewritten to run in game when everything
 	-- it used from the scene is there under another name: the cue's VFX (effect), the rig the cue
 	-- plays on (character), or, for a cue on the main character, another rig given in data.Rigs.
-	local function attachCode(cue: Cue, code: string?, object: Instance?)
-		if not code then
+	-- An Eclipse event (on `item`) can also have code for when it ends, and its code gets locals from
+	-- Eclipse: rig (what the event is on), parameter, event and context (a table both parts share).
+	local function attachCode(cue: Cue, code: string?, object: Instance?, item: SaveReader.Item?, marker: SaveReader.Marker?)
+		local finish = if marker then marker.EndCode else nil
+		if not code and not finish then
 			return
 		end
-		cue.Code = code
+		-- Modules are required as they are, once, not cloned for each cue.
+		code = if code then Exporter.withoutClonedRequires(code) else nil
+		finish = if finish then Exporter.withoutClonedRequires(finish) else nil
+		cue.Code = code or ""
+		if finish and marker then
+			cue.EndCode = finish
+			cue.EndDelay = math.round(marker.Width / fps * 1000) / 1000
+		end
 
 		local names = {}
 		local home = homeOf(ctx, object)
@@ -1459,33 +2165,88 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 			names[object] = if object:IsA("Attachment") or cue.Wrap then string.format("effect:FindFirstChild(%q, true)", object.Name) else "effect"
 		end
 
-		local adapted, used = Exporter.adaptCode(code, names)
-		if not adapted then
-			cue.CodeMissing = used
-			table.insert(warnings, `The event at frame {cue.Frame} ("{cue.Effect}") runs code that uses {table.concat(used, ", ")} from your Moon scene, which the game won't have, so it can't run as it is. It's in the cue's Function, commented out, to adapt.`)
+		-- Eclipse's locals, for the ones the code uses. rig needs a name in game, like a path would.
+		local missing: { string } = {}
+		local extra: { Instance } = {}
+		if eclipse and marker then
+			local text = (code or "") .. "\n" .. (finish or "")
+			local locals = {}
+			if usesName(text, "rig") then
+				local on = item and item.Instance
+				local value = if on then names[on] else nil
+				if on and value then
+					table.insert(locals, { Name = "rig", Value = value })
+					table.insert(extra, on)
+				else
+					table.insert(missing, if on then on.Name elseif item then pathLeaf(item) else "rig")
+				end
+			end
+			if usesName(text, "parameter") then
+				table.insert(locals, { Name = "parameter", Value = string.format("%q", marker.Parameter or "") })
+			end
+			if usesName(text, "event") then
+				table.insert(locals, {
+					Name = "event",
+					Value = string.format("{ Name = %q, Frame = %d, Duration = %d, Parameter = %q }", marker.Name, marker.Frame, marker.Width, marker.Parameter or ""),
+				})
+			end
+			if usesName(text, "context") then
+				table.insert(locals, { Name = "context", Value = "{}" })
+			end
+			cue.Locals = locals
+		end
+
+		local adapted, used = Exporter.adaptCode(code or "", names)
+		local adaptedEnd, usedEnd = nil, {}
+		if finish then
+			adaptedEnd, usedEnd = Exporter.adaptCode(finish, names)
+		end
+		for _, list in { if adapted then {} else used, if finish and not adaptedEnd then usedEnd else {} } do
+			for _, name in list do
+				if not table.find(missing, name) then
+					table.insert(missing, name)
+				end
+			end
+		end
+		if #missing > 0 then
+			cue.CodeMissing = missing
+			table.insert(warnings, `The event at frame {cue.Frame} ("{cue.Effect}") runs code that uses {table.concat(missing, ", ")} from your {tool} scene, which the game won't have, so it can't run as it is. It's in the cue's Function, commented out, to adapt.`)
 			return
 		end
+
+		local all = table.clone(used)
+		for _, list in { usedEnd, extra } do
+			for _, inst in list do
+				if not table.find(all, inst) then
+					table.insert(all, inst)
+				end
+			end
+		end
 		local uses, rigs = {}, {}
-		for _, inst in used do
+		for _, inst in all do
 			table.insert(uses, { From = inst.Name, To = names[inst] })
 			if inst ~= object and home and inst ~= home.Rig then
 				table.insert(rigs, inst.Name)
 			end
 		end
 		cue.Adapted = {
-			Code = Exporter.addCleanup(adapted),
+			Code = Exporter.addCleanup(adapted :: string),
+			EndCode = if adaptedEnd then Exporter.addCleanup(adaptedEnd) else nil,
 			Uses = uses,
-			Effect = object ~= nil and table.find(used, object) ~= nil,
+			Effect = object ~= nil and table.find(all, object) ~= nil,
 			Rigs = rigs,
 		}
 	end
 
-	-- The Moon file's frame rate.
-	local fps = if anim.FPS > 0 then anim.FPS else 60
-
 	for _, item in anim.Items do
 		-- A screen effect becomes one cue, which the Sequence module plays.
 		if isScreenEffect(item) then
+			if item.ItemType == "ScreenEffect" then
+				for _, cue in Exporter.eclipseScreenCues(item, fps, anim.Length, warnings) do
+					table.insert(cues, cue)
+				end
+				continue
+			end
 			local cue = Exporter.screenCue(item, fps)
 			if cue then
 				table.insert(cues, cue)
@@ -1503,7 +2264,7 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 
 		-- Moon's Subtitles, the camera and other things that aren't VFX objects: their events only
 		-- count for what their code emits or names (people put VFX Forge events on Subtitles).
-		local notVfx = if item.Instance then isNotVfxInstance(item.Instance) else isNotVfxPath(item)
+		local notVfx = item.ItemType == "Camera" or (if item.Instance then isNotVfxInstance(item.Instance) else isNotVfxPath(item))
 
 		if not item.Instance and not notVfx then
 			table.insert(warnings, `Couldn't find {item.Path} in the place; its events use an empty offset.`)
@@ -1518,33 +2279,115 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 			-- several things at once, from an event on any item. Each emitted object is a cue.
 			-- Effects it names inside the same attachment or part are one cue, so they fire together
 			-- and only they fire; an object it names whole is spawned whole.
+			-- A module's emit method is the same, and the Sequence emits through that module (the cue's
+			-- Emitter), so the cue needs no Function for it. What else the code does stays (`rest`).
 			local emitted, named, whole, calls = {}, {}, {}, 0
+			local emitters, byDefault, rest = {}, {}, {}
+			-- Whether code that stays still emits something itself (the Sequence then mustn't).
+			local stillEmits = false
 			for _, code in marker.Code do
-				local found, callCount = Exporter.findEmitTargets(code)
-				calls += callCount
-				for _, inst in found do
-					local object = emittedObject(inst)
-					if not object then
-						continue
+				local found = Exporter.findEmitCalls(code)
+				calls += #found
+				for _, call in found do
+					if not call.Removable then
+						stillEmits = true
 					end
-					if not table.find(emitted, object) then
-						table.insert(emitted, object)
-					end
-					if object == inst then
-						whole[object] = true
-					else
-						named[object] = named[object] or {}
-						table.insert(named[object], inst)
+					for _, inst in call.Targets do
+						local object = emittedObject(inst)
+						if not object then
+							continue
+						end
+						if not table.find(emitted, object) then
+							table.insert(emitted, object)
+						end
+						if object == inst then
+							whole[object] = true
+						else
+							named[object] = named[object] or {}
+							table.insert(named[object], inst)
+						end
+						if call.Removable then
+							if call.Emitter then
+								emitters[object] = call.Emitter
+							else
+								byDefault[object] = true
+							end
+						end
 					end
 				end
+				local left = if #found > 0 then Exporter.withoutEmitCalls(code, found) else code
+				if left then
+					table.insert(rest, left)
+				end
 			end
+			-- Eclipse's own emits, each naming what to emit from the item the event is on: Exact emits
+			-- the effect it names, Selected the effects right inside what it names, All everything in
+			-- it (see EclipseReader).
+			local counts = {}
+			for _, row in marker.Emits or {} do
+				local inst = row.Instance
+				local effects: { Instance }? = nil
+				if not isEffect(inst) then
+					if row.Mode == "Exact" then
+						continue
+					elseif row.Mode == "Selected" then
+						effects = {}
+						for _, child in inst:GetChildren() do
+							if isEffect(child) then
+								table.insert(effects :: { Instance }, child)
+							end
+						end
+						if #(effects :: { Instance }) == 0 then
+							continue
+						end
+					end
+				end
+				local object = emittedObject(inst)
+				if not object then
+					continue
+				end
+				if not table.find(emitted, object) then
+					table.insert(emitted, object)
+				end
+				if effects then
+					named[object] = named[object] or {}
+					for _, effect in effects do
+						if not table.find(named[object], effect) then
+							table.insert(named[object], effect)
+						end
+					end
+				elseif object == inst then
+					whole[object] = true
+				else
+					named[object] = named[object] or {}
+					table.insert(named[object], inst)
+				end
+				counts[object] = row.Count or counts[object]
+				byDefault[object] = true
+			end
+
 			if #emitted > 0 then
 				eventCount += 1
+				local firstCue = nil
 				for _, object in emitted do
 					local only = if whole[object] then nil else named[object]
 					local name = if only and #only == 1 then only[1].Name else object.Name
 					local holder, keep = holdingBeamEnds(object, only)
-					addCue(item, marker, holder, false, #emitted == 1, nil, name).Only = keep
+					local cue = addCue(item, marker, holder, false, #emitted == 1, nil, name)
+					cue.Only = keep
+					cue.EmitCount = counts[object]
+					cue.Emitter = emitters[object]
+					cue.DefaultEmit = byDefault[object]
+					firstCue = firstCue or cue
+				end
+				-- What else the event's code does goes on the first cue's Function.
+				local leftover = table.concat(rest, "\n")
+				local more = if string.find(leftover, "%S") then leftover else nil
+				if firstCue and (more or marker.EndCode) then
+					attachCode(firstCue, more, firstCue.Object, item, marker)
+					if stillEmits then
+						firstCue.Emitter = false
+					end
 				end
 				continue
 			end
@@ -1556,15 +2399,23 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 			-- Other code (tweening beams, making a Highlight...) ran against the Moon scene, so it's
 			-- put in the cue's Function to adapt. The cue spawns what the code names, if anything.
 			local code = eventCode(marker)
+			local hasCode = code ~= nil or marker.EndCode ~= nil
+
+			-- An Eclipse event with nothing else to play here: one that only switches effects on or
+			-- off (their Enabled keys play that), emits nothing in the end, or has no name.
+			if eclipse and not hasCode and (marker.Name == "" or #(marker.Switches or {}) > 0 or #(marker.Emits or {}) > 0) then
+				continue
+			end
+
 			if notVfx or keyedEffect then
-				if not code then
+				if not hasCode then
 					skip(item)
 					continue
 				end
 				eventCount += 1
 				local object = codeObjectFor(marker, nil)
 				if object then
-					attachCode(addCue(item, marker, object, true, true), code, object)
+					attachCode(addCue(item, marker, object, true, true), code, object, item, marker)
 				else
 					local cue: Cue = {
 						Frame = marker.Frame,
@@ -1573,7 +2424,7 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 						Notes = {},
 					}
 					table.insert(cues, cue)
-					attachCode(cue, code, nil)
+					attachCode(cue, code, nil, item, marker)
 				end
 				continue
 			end
@@ -1588,7 +2439,7 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 			end
 			eventCount += 1
 
-			attachCode(addCue(item, marker, object, fromCode, true), code, object)
+			attachCode(addCue(item, marker, object, fromCode, true), code, object, item, marker)
 		end
 	end
 
@@ -1681,7 +2532,7 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 							local here, after = cframeAt(ctx, inst, cue.Frame), cframeAt(ctx, inst, cue.Frame + 1)
 							local moved = if here and after then here.Position - after.Position else nil
 							if moved and math.abs(moved.X) + math.abs(moved.Y) + math.abs(moved.Z) > 1e-4 then
-								table.insert(cue.Notes, "it's moving in Moon when this fires, but only where it is at this frame is exported")
+								table.insert(cue.Notes, `it's moving in {tool} when this fires, but only where it is at this frame is exported`)
 							end
 						end
 					end

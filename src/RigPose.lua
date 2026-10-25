@@ -8,13 +8,15 @@
 --   welded part    keeps its placement relative to whatever it's welded to
 --   anything else  rides the rig as a whole
 -- None of this depends on where Moon's playhead was left, unlike the live scene.
+-- Eclipse Animator poses a joint by its C0 instead, and its joints name their Motor6D (see
+-- SaveReader.Joint).
 
 local Sampler = require(script.Parent.Sampler)
 
 local RigPose = {}
 RigPose.__index = RigPose
 
-export type Joint = { Hier: { string }, Default: CFrame?, Track: { any } }
+export type Joint = { Hier: { string }, Default: CFrame?, Track: { any }, Motor: Motor6D?, Keyed: string? }
 
 function RigPose.new(rig: Model, root: BasePart, rootTrack: { any }?, joints: { Joint }?, moonEasing: { [string]: any }?)
 	local self = setmetatable({
@@ -53,6 +55,10 @@ function RigPose.new(rig: Model, root: BasePart, rootTrack: { any }?, joints: { 
 
 	-- A joint's _hier ("Torso.Right Arm") names the chain of parts from the root.
 	for _, joint in joints or {} do
+		if joint.Motor then
+			self.JointTracks[joint.Motor] = joint
+			continue
+		end
 		local current: BasePart = root
 		local motor: Motor6D? = nil
 		for _, name in joint.Hier do
@@ -101,15 +107,17 @@ function RigPose:Resolve(part: BasePart, frame: number, visiting: { [BasePart]: 
 	if motor and motor.Part0 then
 		local parent = self:Resolve(motor.Part0, frame, visiting)
 		if parent then
-			local c1 = motor.C1
+			local c0, c1 = motor.C0, motor.C1
 			local joint = self.JointTracks[motor]
 			if joint then
 				local keyed = Sampler.sample(joint.Track, frame, self.MoonEasing)
-				if typeof(keyed) == "CFrame" then
+				if joint.Keyed == "C0" then
+					c0 = if typeof(keyed) == "CFrame" then keyed else joint.Default or c0
+				elseif typeof(keyed) == "CFrame" then
 					c1 = keyed
 				end
 			end
-			return parent * motor.C0 * c1:Inverse()
+			return parent * c0 * c1:Inverse()
 		end
 	end
 
