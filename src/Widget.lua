@@ -360,7 +360,7 @@ function Widget.new(dock: DockWidgetPluginGui)
 
 	local fileRow = row(fileCard)
 	self.Buttons.Refresh = button(fileRow, "Refresh", UDim.new(0, 72))
-	self.Buttons.Detect = button(fileRow, "Use file open in Moon", UDim.new(1, -(72 + GAP)))
+	self.Buttons.Detect = button(fileRow, "Use file open in Moon or Eclipse", UDim.new(1, -(72 + GAP)))
 
 	-- Output ------------------------------------------------------------------------------
 	local outputCard = card("Output")

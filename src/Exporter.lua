@@ -6,6 +6,7 @@
 --   HumanoidRootPart.CFrame:ToObjectSpace(effectPart.CFrame)
 -- except the CFrames are sampled from the save's keyframes, so nothing has to be scrubbed.
 
+local EclipseReader = require(script.Parent.EclipseReader)
 local RigPose = require(script.Parent.RigPose)
 local Sampler = require(script.Parent.Sampler)
 local SaveReader = require(script.Parent.SaveReader)
@@ -75,11 +76,17 @@ export type Cue = {
 	Emitter: ({ Name: string, Module: string } | boolean)?,
 	-- Its VFX was emitted with VFX Forge, or by Eclipse: the Sequence's own emit does that.
 	DefaultEmit: boolean?,
+	-- One of Eclipse's subtitles, which the Sequence draws as Eclipse does (see Exporter.subtitleCue).
+	Subtitle: { [string]: any }?,
+	-- Seconds before its VFX is removed, when that isn't the animation's Lifetime: an Eclipse
+	-- letterbox showing until the animation ends, say.
+	Lifetime: number?,
 }
 
 -- Keyframes a cue replays: Kind "Animate" plays them on the spawned effect (or the
 -- instance at Path inside it, with CFrame keys relative to where the character stands if Origin);
--- Kind "Lighting" plays them on Lighting, and "Camera" on the camera (its field of view).
+-- Kind "Lighting" plays them on Lighting, "Camera" on the camera (its field of view), and "Shake"
+-- shakes the camera with them, as Eclipse's Camera Shake does.
 -- A key's Bezier is the control points of an Eclipse Bezier ease (Style "Bezier", see Easing.bezier).
 export type Animation = {
 	Kind: string,
@@ -89,6 +96,9 @@ export type Animation = {
 	-- Seconds the last values hold before Lighting or the camera is put back: until the animation
 	-- ends, as in Moon.
 	Hold: number?,
+	-- A camera shake's pattern, and how far into it the shake is when the cue fires.
+	Seed: number?,
+	Phase: number?,
 }
 
 -- One of Moon's screen effects: an overlay in its MoonAnimatorEffects GUI (a vignette, a flash...)
@@ -105,6 +115,8 @@ export type ScreenEffect = {
 	-- Seconds to keep showing it, if that's longer than its keys: an Eclipse effect still showing
 	-- when its keys end shows until the animation does.
 	Hold: number?,
+	-- Its text sizes are for a 1080 pixel tall screen, and scale to the player's (Moon's Subtitles).
+	ScaleText: boolean?,
 }
 
 export type Result = {
@@ -1354,7 +1366,7 @@ end
 local SCREEN_PROPERTIES = {
 	GuiObject = { "AnchorPoint", "Position", "Size", "Rotation", "BackgroundColor3", "BackgroundTransparency", "BorderSizePixel", "ZIndex", "Visible" },
 	ImageLabel = { "Image", "ImageColor3", "ImageTransparency", "ScaleType", "SliceCenter", "SliceScale", "ResampleMode", "TileSize" },
-	TextLabel = { "Text", "TextColor3", "TextTransparency", "TextSize", "Font", "TextScaled", "TextWrapped", "TextStrokeColor3", "TextStrokeTransparency", "TextXAlignment", "TextYAlignment", "RichText" },
+	TextLabel = { "Text", "TextColor3", "TextTransparency", "TextSize", "FontFace", "TextScaled", "TextWrapped", "TextStrokeColor3", "TextStrokeTransparency", "TextXAlignment", "TextYAlignment", "RichText", "MaxVisibleGraphemes" },
 	PostEffect = { "Enabled" },
 	BlurEffect = { "Size" },
 	ColorCorrectionEffect = { "Brightness", "Contrast", "Saturation", "TintColor" },
@@ -1389,6 +1401,140 @@ local function isScreenEffect(item: SaveReader.Item): boolean
 		return true
 	end
 	return table.find(item.PathNames, "MoonAnimatorEffects") ~= nil and pathLeaf(item) ~= "Subtitles"
+end
+
+-- Moon's Subtitles: the text label in its MoonAnimatorEffects GUI that shows lines of text.
+local function isMoonSubtitles(item: SaveReader.Item): boolean
+	if pathLeaf(item) ~= "Subtitles" then
+		return false
+	end
+	local inst = item.Instance
+	if inst then
+		return inst:IsA("TextLabel") and inst:FindFirstAncestor("MoonAnimatorEffects") ~= nil
+	end
+	return table.find(item.PathNames, "MoonAnimatorEffects") ~= nil
+end
+
+-- Moon's overlays as Moon makes them, for when it isn't open to copy them from: the piece right
+-- under its MoonAnimatorEffects GUI, by name, with its own pieces.
+local function moonImage(id: string, name: string?, size: UDim2, position: UDim2?, children: { any }?): any
+	return {
+		Name = name,
+		ClassName = "ImageLabel",
+		Properties = {
+			Size = size,
+			Position = position or UDim2.new(),
+			ZIndex = -500,
+			BackgroundTransparency = 1,
+			Image = "rbxassetid://" .. id,
+			ImageColor3 = Color3.new(0, 0, 0),
+			ImageTransparency = 1,
+			ScaleType = Enum.ScaleType.Stretch,
+		},
+		Children = children,
+	}
+end
+local function moonBar(name: string, bottom: boolean): any
+	return {
+		Name = name,
+		ClassName = "Frame",
+		Properties = {
+			Size = UDim2.new(1, 0, 0.12174941, 0),
+			Position = UDim2.new(0, 0, if bottom then 1 else 0, 0),
+			AnchorPoint = Vector2.new(0, if bottom then 1 else 0),
+			ZIndex = -499,
+			BackgroundColor3 = Color3.new(0, 0, 0),
+			BackgroundTransparency = 1,
+		},
+	}
+end
+local MOON_TEMPLATES: { [string]: any } = {
+	-- Four images tiling a 1920 by 1080 screen (one image can't be that big).
+	Vignette = moonImage("4764912210", nil, UDim2.new(0.53333336, 0, 0.94814813, 0), nil, {
+		moonImage("4764912960", "UR", UDim2.new(0.875, 0, 1, 0), UDim2.new(1, 0, 0, 0)),
+		moonImage("4764912557", "LL", UDim2.new(1, 0, 0.0546875, 0), UDim2.new(0, 0, 1, 0), {
+			moonImage("4764912732", "LR", UDim2.new(0.875, 0, 1, 0), UDim2.new(1, 0, 0, 0)),
+		}),
+	}),
+	-- Two bars in a frame; Moon keys the bottom one, named like the frame.
+	Letterbox = {
+		ClassName = "Frame",
+		Properties = { Size = UDim2.fromScale(1, 1), ZIndex = -499, BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 1 },
+		Children = { moonBar("Top", false), moonBar("Letterbox", true) },
+	},
+	["Screen Cover"] = {
+		ClassName = "Frame",
+		Properties = { Size = UDim2.fromScale(1, 1), ZIndex = -501, BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 1 },
+	},
+	-- Its text is sized for a 1080 pixel tall screen; Moon scales it to the one it's on.
+	Subtitles = {
+		ClassName = "TextLabel",
+		Properties = {
+			Size = UDim2.new(1, 0, 0.700946, 0),
+			Position = UDim2.new(0, 0, 0.14952719, 0),
+			ZIndex = -498,
+			BackgroundTransparency = 1,
+			BackgroundColor3 = Color3.new(1, 1, 1),
+			Text = "",
+			TextSize = 72,
+			TextWrapped = true,
+			FontFace = Font.new("rbxasset://fonts/families/SourceSansPro.json", Enum.FontWeight.SemiBold, Enum.FontStyle.Normal),
+			TextColor3 = Color3.new(1, 1, 1),
+			TextStrokeColor3 = Color3.new(0, 0, 0),
+			TextStrokeTransparency = 0,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Bottom,
+		},
+	},
+}
+
+-- One of Moon's overlays from its template (see MOON_TEMPLATES): the template, the names leading
+-- from it to the piece the item keys, and its pieces as data (see guiChildren). nil when the item
+-- isn't one of Moon's own.
+local function fromMoonTemplate(item: SaveReader.Item): (any?, { string }, { any }?)
+	local at = table.find(item.PathNames, "MoonAnimatorEffects")
+	local names = if at then table.move(item.PathNames, at + 1, #item.PathNames, 1, {}) else {}
+	local template = MOON_TEMPLATES[names[1] or ""]
+	if not template then
+		return nil, {}, nil
+	end
+	local path = table.move(names, 2, #names, 1, {})
+	if names[1] == "Letterbox" and #path == 0 then
+		path = { "Letterbox" }
+	end
+
+	-- The keyed piece, and the pieces on the way to it.
+	local keyed, ancestors = template, {}
+	for _, name in path do
+		ancestors[keyed] = true
+		local found = nil
+		for _, child in keyed.Children or {} do
+			if child.Name == name then
+				found = child
+			end
+		end
+		if not found then
+			break
+		end
+		keyed = found
+	end
+	local function copy(children: { any }?): { any }?
+		if not children then
+			return nil
+		end
+		local out = {}
+		for _, child in children do
+			table.insert(out, {
+				Name = child.Name,
+				ClassName = child.ClassName,
+				Properties = table.clone(child.Properties),
+				Children = copy(child.Children),
+				Mirrors = child ~= keyed and child.ClassName == keyed.ClassName and not ancestors[child],
+			})
+		end
+		return out
+	end
+	return template, path, copy(template.Children)
 end
 
 -- The first keyed frame across an item's tracks, or nil if nothing is keyed.
@@ -1486,8 +1632,10 @@ local function guiChildren(parent: Instance, keyed: Instance): { any }?
 end
 
 -- A cue for one of Moon's screen effects, at the frame its keyframes start: its class, look and
--- keys, which the Sequence module recreates and replays. nil if nothing in it is keyed.
-function Exporter.screenCue(item: SaveReader.Item, fps: number): Cue?
+-- keys, which the Sequence module recreates and replays. nil if nothing in it is keyed. Moon's
+-- Subtitles size their text for the screen, and their last line stays up until the animation ends
+-- (`length`, its last frame).
+function Exporter.screenCue(item: SaveReader.Item, fps: number, length: number?): Cue?
 	local first = firstKey(item)
 	if not first then
 		return nil
@@ -1499,6 +1647,7 @@ function Exporter.screenCue(item: SaveReader.Item, fps: number): Cue?
 	local notes = {}
 	local inst = item.Instance
 	local children, path = nil, nil
+	local template, keyedPath, pieces = fromMoonTemplate(item)
 	if inst then
 		properties = guiProperties(inst)
 
@@ -1523,6 +1672,15 @@ function Exporter.screenCue(item: SaveReader.Item, fps: number): Cue?
 			end
 			children = guiChildren(root, inst)
 		end
+	elseif template then
+		-- Moon isn't open, so its overlay is made as Moon makes it.
+		class, properties, children = template.ClassName, table.clone(template.Properties), pieces
+		path = if #keyedPath > 0 then keyedPath else nil
+		for name, value in item.Defaults do
+			if not path then
+				properties[name] = value
+			end
+		end
 	else
 		-- Moon isn't open, so its overlay can't be copied: start from the keyed properties' first
 		-- values, on a see-through, full-screen element.
@@ -1536,12 +1694,24 @@ function Exporter.screenCue(item: SaveReader.Item, fps: number): Cue?
 		end
 	end
 
+	local scaleText, hold = nil, nil
+	if isMoonSubtitles(item) then
+		-- Moon scales its text from 72 on a 1080 pixel tall screen as it plays, so the size it shows
+		-- now isn't the one to copy.
+		properties.TextSize, scaleText = 72, true
+		local lines = item.Tracks.Text
+		local last = lines and lines[#lines]
+		if last and type(last.Value) == "string" and string.find(last.Value, "%S") and length and length > last.Time then
+			hold = math.round((length - first) / fps * 1000) / 1000
+		end
+	end
+
 	return {
 		Frame = first,
 		Effect = pathLeaf(item),
 		Offset = CFrame.new(),
 		Notes = notes,
-		Screen = { ClassName = class, Properties = properties, Keys = keys, Children = children, Path = path },
+		Screen = { ClassName = class, Properties = properties, Keys = keys, Children = children, Path = path, Hold = hold, ScaleText = scaleText },
 	}
 end
 
@@ -1651,6 +1821,119 @@ local function barCover(top: BasePart, bottom: BasePart, model: Instance, size: 
 	return math.clamp(if isTop then (height / 2 - inner) / height else (inner + height / 2) / height, 0, 1)
 end
 
+-- The cue for one of Eclipse's camera shakes, from where it starts shaking: its Strength, Speed and
+-- Enabled keys, which the Sequence's CameraShake plays as Eclipse does; its pattern (Seed, picked
+-- from the effect's id as Eclipse picks it); and how far into the pattern it is by then (Phase:
+-- Eclipse's shakes move through theirs from the start of the animation). None if it never shakes.
+local function shakeCues(item: SaveReader.Item, fps: number, length: number): { Cue }
+	local model = item.Instance
+	local function at(id: string, frame: number): any
+		local track = item.Tracks[id]
+		if track and #track > 0 then
+			return Sampler.sample(track, frame)
+		end
+		local value = if model then model:GetAttribute("Effect" .. id) else nil
+		if value == nil then
+			value = item.Defaults[id]
+		end
+		return value
+	end
+	local function finite(value: any): boolean
+		return type(value) == "number" and value == value and math.abs(value) ~= math.huge
+	end
+	local function speed(frame: number): number
+		local value = at("Speed", frame)
+		return if finite(value) then math.clamp(value, 0, 60) else 12
+	end
+	local function strength(frame: number): number
+		local value = at("Strength", frame)
+		if at("Enabled", frame) == false or not finite(value) then
+			return 0
+		end
+		return math.clamp(value, 0, 100)
+	end
+
+	local lastKey = 0
+	for _, track in item.Tracks do
+		if #track > 0 then
+			lastKey = math.max(lastKey, track[#track].Time)
+		end
+	end
+	local finish = math.max(length, lastKey)
+	local first = nil
+	for frame = 0, finish do
+		if strength(frame) > 0 then
+			first = frame
+			break
+		end
+	end
+	if not first then
+		return {}
+	end
+
+	-- From the key it starts shaking after, so its keys play from one (see relativeKeys).
+	local start = -math.huge
+	for _, id in { "Strength", "Enabled" } do
+		for _, key in item.Tracks[id] or {} do
+			if key.Time <= first then
+				start = math.max(start, key.Time)
+			end
+		end
+	end
+	if start == -math.huge then
+		start = first
+	end
+
+	local tracks = {}
+	for _, id in { "Strength", "Speed", "Enabled" } do
+		local track = item.Tracks[id]
+		if track and #track > 0 then
+			tracks[id] = track
+		end
+	end
+	local keys = relativeKeys({ Tracks = tracks } :: any, start, fps)
+	-- What isn't keyed is as the effect is.
+	if not keys.Strength then
+		keys.Strength = { { Time = 0, Value = strength(start) } }
+	end
+	if not keys.Speed and speed(start) ~= 12 then
+		keys.Speed = { { Time = 0, Value = speed(start) } }
+	end
+
+	-- Where its pattern is by `start`: the speed it moved at, added up from the start.
+	local phase = 0
+	if tracks.Speed then
+		local steps = math.max(1, math.ceil(start * 4))
+		local step = start / steps
+		for i = 0, steps - 1 do
+			local from = i * step
+			phase += step / 6 * (speed(from) + 4 * speed(from + step / 2) + speed(from + step))
+		end
+		phase /= fps
+	else
+		phase = speed(start) * start / fps
+	end
+
+	local seed = 0
+	local id = if model then model:GetAttribute("EclipseTrackId") else nil
+	id = if type(id) == "string" then id else item.TrackId
+	for i = 1, if id then #id else 0 do
+		seed = (seed * 31 + string.byte(id :: string, i)) % 65521
+	end
+
+	-- Still shaking when its keys end: it goes on until the animation does.
+	local hold = if strength(lastKey) > 0 and finish > start then math.round((finish - start) / fps * 1000) / 1000 else nil
+	return {
+		{
+			Frame = start,
+			Effect = pathLeaf(item),
+			Offset = CFrame.new(),
+			Notes = {},
+			Animation = { Kind = "Shake", Keys = keys, Hold = hold, Seed = seed, Phase = math.round(phase * 10000) / 10000 },
+		},
+	}
+end
+
 -- The cues for one of Eclipse's effect objects: one (for impact frames, one per image shown), or
 -- none when it never shows. `length` is the animation's last frame.
 function Exporter.eclipseScreenCues(item: SaveReader.Item, fps: number, length: number, warnings: { string }): { Cue }
@@ -1658,8 +1941,7 @@ function Exporter.eclipseScreenCues(item: SaveReader.Item, fps: number, length: 
 	local kind = if model then model:GetAttribute("EffectKind") else nil
 	local name = pathLeaf(item)
 	if kind == "Camera Shake" then
-		table.insert(warnings, `{name} is an Eclipse camera shake, which isn't exported yet.`)
-		return {}
+		return shakeCues(item, fps, length)
 	end
 
 	local defaults: { [string]: any } = {
@@ -1901,26 +2183,90 @@ function Exporter.eclipseScreenCues(item: SaveReader.Item, fps: number, length: 
 		end
 		finishStretch(math.max(first, last), true)
 		return cues
+	elseif kind == "Letterbox" and model and model:GetAttribute("EffectStyle") ~= "Solid" then
+		-- A letterbox made of effects: beams and particles on an invisible plane in front of the
+		-- camera, which follows the camera on a part rig. It's spawned whole, kept in front of the
+		-- camera, and faded and tinted by its keys (on a model, those go to its effects as Eclipse
+		-- paints them). The Sequence doesn't emit it: its effects run while it shows.
+		local samples = { Transparency = {}, Color = {} }
+		local visible = false
+		for f = first, math.max(first, last) do
+			visible = visible or shown(f) < 1
+			table.insert(samples.Transparency, { Frame = f, Value = shown(f) })
+			table.insert(samples.Color, { Frame = f, Value = at("Color", f) })
+		end
+		if not visible then
+			return {}
+		end
+		local keys = {}
+		for property, list in samples do
+			keys[property] = framesToKeys(list, first, fps)
+		end
+		if at("Gradient", first) == true then
+			table.insert(warnings, `{name}'s gradient isn't exported; it's tinted its first colour.`)
+		end
+		if item.Tracks.VFXSize then
+			table.insert(warnings, `{name}'s VFX Size is keyed, which isn't exported; it keeps the size it has now.`)
+		end
+
+		-- Where it is from the camera: its part rig's root stands where Eclipse's camera is.
+		local root: BasePart? = nil
+		for _, part in model:GetDescendants() do
+			if part:IsA("BasePart") and part:GetAttribute("EclipsePartRigRoot") then
+				root = part
+			end
+		end
+		local pivot = (model :: Model):GetPivot()
+		local camera = if root then root.CFrame else pivot
+		local hold = holdFrom(first, last)
+		local fov = model:GetAttribute("EffectReferenceFOV")
+		return {
+			{
+				Frame = first,
+				Effect = name,
+				Offset = camera:ToObjectSpace(pivot),
+				Notes = if type(fov) == "number" then { `made for a {fov}° field of view` } else {},
+				Object = model,
+				Parent = "Camera",
+				Emitter = false,
+				Lifetime = hold or math.max(1 / fps, math.round((last - first) / fps * 1000) / 1000),
+				Animation = { Kind = "Animate", Keys = keys },
+			},
+		}
 	elseif kind == "Letterbox" then
 		local top = model and model:FindFirstChild("Top")
 		local bottom = model and model:FindFirstChild("Bottom")
-		if not (model and model:GetAttribute("EffectStyle") == "Solid" and top and bottom and top:IsA("BasePart") and bottom:IsA("BasePart")) then
-			table.insert(warnings, `{name} is an Eclipse letterbox made of effects, which isn't exported yet (solid ones are).`)
+		if not (model and top and bottom and top:IsA("BasePart") and bottom:IsA("BasePart")) then
+			table.insert(warnings, `{name} is an Eclipse letterbox without its bars, so it's left out.`)
 			return {}
 		end
-		if item.Tracks.TopSize or item.Tracks.BottomSize then
-			table.insert(warnings, `{name}'s bar sizes are keyed, which isn't exported; its bars keep the size they have now.`)
+		local function cover(isTop: boolean, f: number): number
+			local part = (if isTop then top else bottom) :: BasePart
+			local keyed = item.Tracks[if isTop then "TopSize" else "BottomSize"]
+			local size = if keyed and #keyed > 0 then Sampler.sample(keyed, f) else nil
+			local height = if typeof(size) == "Vector3" then math.max(0.001, size.Y) else part.Size.Y
+			return barCover(top :: BasePart, bottom :: BasePart, model :: Instance, height, isTop)
 		end
 		local function bar(barName: string, isTop: boolean, f: number): any
-			local part = (if isTop then top else bottom) :: BasePart
+			-- A bar whose size is keyed (an older Eclipse letterbox's) has its own keys for it.
+			local keyed = item.Tracks[if isTop then "TopSize" else "BottomSize"]
+			local keys = nil
+			if keyed and #keyed > 0 then
+				local samples = {}
+				for frame = f, math.max(f, last) do
+					table.insert(samples, { Frame = frame, Value = UDim2.fromScale(1, cover(isTop, frame)) })
+				end
+				keys = { Size = framesToKeys(samples, f, fps) }
+			end
 			return {
 				Name = barName,
 				ClassName = "Frame",
 				Mirrors = not isTop,
+				Keys = keys,
 				Properties = {
 					AnchorPoint = Vector2.new(0, if isTop then 0 else 1),
 					Position = UDim2.fromScale(0, if isTop then 0 else 1),
-					Size = UDim2.fromScale(1, barCover(top :: BasePart, bottom :: BasePart, model :: Instance, part.Size.Y, isTop)),
+					Size = UDim2.fromScale(1, cover(isTop, f)),
 					BorderSizePixel = 0,
 					BackgroundColor3 = at("Color", f),
 					BackgroundTransparency = shown(f),
@@ -1936,6 +2282,75 @@ function Exporter.eclipseScreenCues(item: SaveReader.Item, fps: number, length: 
 
 	table.insert(warnings, `{name} is an Eclipse effect of a kind this exporter doesn't know ({tostring(kind)}), so it's left out.`)
 	return {}
+end
+
+-- Eclipse's subtitles ------------------------------------------------------------------------------
+
+-- A subtitle style as the Sequence needs it: what differs from Eclipse's defaults (with no text of
+-- its own), and its words' own looks. A key's is what differs from its subtitle's style (`base`).
+local function subtitleStyle(style: { [string]: any }, base: { [string]: any }?): { [string]: any }
+	local out = {}
+	for key, default in EclipseReader.SUBTITLE_DEFAULTS do
+		local from = if base then base[key] elseif key == "Text" then "" else default
+		if style[key] ~= from then
+			out[key] = style[key]
+		end
+	end
+	-- Words, as text: their looks are only ever strings, numbers and booleans.
+	local function words(value: any): string
+		local list = {}
+		for index, look in if type(value) == "table" then value else {} do
+			local fields = {}
+			for name, v in look do
+				table.insert(fields, `{name}={tostring(v)}`)
+			end
+			table.sort(fields)
+			table.insert(list, `{index}:{table.concat(fields, ",")}`)
+		end
+		table.sort(list)
+		return table.concat(list, ";")
+	end
+	if words(style.Words) ~= words(if base then base.Words else nil) then
+		out.Words = style.Words or {}
+	end
+	return out
+end
+
+-- The cue for one of Eclipse's subtitles, at its frame: what the Sequence's Subtitle draws, with
+-- its times in seconds (see the top of the Sequence module).
+function Exporter.subtitleCue(subtitle: SaveReader.Subtitle, fps: number): Cue
+	local cue = subtitle.Cue
+	local function seconds(frames: number): number
+		return math.round(frames / fps * 10000) / 10000
+	end
+	local data: { [string]: any } = {
+		Duration = seconds(cue.Duration),
+		In = seconds(cue.InFrames),
+		Out = seconds(cue.OutFrames),
+		Style = subtitleStyle(cue.Base, nil),
+	}
+	if cue.Entrance ~= "Fade" then
+		data.Entrance = cue.Entrance
+	end
+	if cue.Exit ~= "Fade" then
+		data.Exit = cue.Exit
+	end
+	if cue.Order ~= 0 then
+		data.Order = cue.Order
+	end
+	if #cue.Keys > 0 then
+		data.Keys = {}
+		for _, key in cue.Keys do
+			table.insert(data.Keys, { seconds(key.Frame), subtitleStyle(key.Value, cue.Base), key.Ease })
+		end
+	end
+	return {
+		Frame = subtitle.Frame,
+		Effect = "Subtitle",
+		Offset = CFrame.new(),
+		Notes = {},
+		Subtitle = data,
+	}
 end
 
 local MAX_FRAME_RATE = 960
@@ -2239,23 +2654,27 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 	end
 
 	for _, item in anim.Items do
-		-- A screen effect becomes one cue, which the Sequence module plays.
-		if isScreenEffect(item) then
+		-- A screen effect becomes one cue, which the Sequence module plays. So do Moon's Subtitles,
+		-- whose events still count for what their code emits (below).
+		local subtitles = isMoonSubtitles(item)
+		if isScreenEffect(item) or subtitles then
 			if item.ItemType == "ScreenEffect" then
 				for _, cue in Exporter.eclipseScreenCues(item, fps, anim.Length, warnings) do
 					table.insert(cues, cue)
 				end
 				continue
 			end
-			local cue = Exporter.screenCue(item, fps)
+			local cue = Exporter.screenCue(item, fps, anim.Length)
 			if cue then
 				table.insert(cues, cue)
-			else
+			elseif not subtitles then
 				for _ in item.Markers do
 					skip(item)
 				end
 			end
-			continue
+			if not subtitles then
+				continue
+			end
 		end
 
 		if #item.Markers == 0 then
@@ -2431,9 +2850,11 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 
 			local object, fromCode = vfxObjectFor(item, marker)
 
-			-- Nothing to spawn: leave the event out.
+			-- Nothing to spawn: leave the event out. That includes an event on a rig with no name and
+			-- no code (only keys in Moon's Events tab, like Damage = 3: markers for the game, which the
+			-- animation itself carries), unless every event is measured at a chosen part.
 			local inst = item.Instance
-			if not object and inst and not isRig(inst) then
+			if not object and inst and (not isRig(inst) or (marker.Name == "" and not hasCode and not options.Target)) then
 				skip(item)
 				continue
 			end
@@ -2441,6 +2862,12 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 
 			attachCode(addCue(item, marker, object, fromCode, true), code, object, item, marker)
 		end
+	end
+
+	-- Eclipse's subtitles: each one a cue the Sequence draws as Eclipse does.
+	for _, subtitle in anim.Subtitles or {} do
+		eventCount += 1
+		table.insert(cues, Exporter.subtitleCue(subtitle, fps))
 	end
 
 	-- Keyframed effects: what Moon animates with keyframes instead of events (a Highlight or light

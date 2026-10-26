@@ -12,6 +12,8 @@ local UDim2MT = {}
 local Vector2MT = {}
 local Color3MT = {}
 local ColorSequenceMT = {}
+local NumberSequenceMT = {}
+local FontMT = {}
 
 local function typeof(value: any): string
 	local mt = getmetatable(value)
@@ -29,6 +31,10 @@ local function typeof(value: any): string
 		return "Color3"
 	elseif mt == ColorSequenceMT then
 		return "ColorSequence"
+	elseif mt == NumberSequenceMT then
+		return "NumberSequence"
+	elseif mt == FontMT then
+		return "Font"
 	end
 	return builtinTypeof(value)
 end
@@ -44,12 +50,85 @@ end
 function Color3.Lerp(a, b, t)
 	return Color3.new(a.R + (b.R - a.R) * t, a.G + (b.G - a.G) * t, a.B + (b.B - a.B) * t)
 end
+function Color3.fromRGB(r: number, g: number, b: number)
+	return Color3.new(r / 255, g / 255, b / 255)
+end
+function Color3.fromHex(hex: string)
+	local r, g, b = string.match(string.gsub(hex, "#", ""), "^(%x%x)(%x%x)(%x%x)$")
+	assert(r, `mock Color3.fromHex: "{hex}" isn't a colour`)
+	return Color3.new(tonumber(r, 16) / 255, tonumber(g, 16) / 255, tonumber(b, 16) / 255)
+end
+function Color3.ToHex(c)
+	local function byte(v)
+		return math.clamp(math.round(v * 255), 0, 255)
+	end
+	return string.format("%02X%02X%02X", byte(c.R), byte(c.G), byte(c.B))
+end
+function Color3.fromHSV(h: number, s: number, v: number)
+	local i = math.floor(h * 6) % 6
+	local f = h * 6 - math.floor(h * 6)
+	local p, q, t = v * (1 - s), v * (1 - f * s), v * (1 - (1 - f) * s)
+	local rgb = ({ { v, t, p }, { q, v, p }, { p, v, t }, { p, q, v }, { t, p, v }, { v, p, q } })[i + 1]
+	return Color3.new(rgb[1], rgb[2], rgb[3])
+end
 
 local ColorSequence = {
 	new = function(a, b)
+		if type(a) == "table" and getmetatable(a) ~= Color3MT then
+			return setmetatable({ Keypoints = a }, ColorSequenceMT)
+		end
 		return setmetatable({ Keypoints = { { Time = 0, Value = a }, { Time = 1, Value = b or a } } }, ColorSequenceMT)
 	end,
 }
+local ColorSequenceKeypoint = {
+	new = function(time, value)
+		return { Time = time, Value = value }
+	end,
+}
+local NumberSequence = {
+	new = function(a, b)
+		if type(a) == "table" then
+			return setmetatable({ Keypoints = a }, NumberSequenceMT)
+		end
+		return setmetatable({ Keypoints = { { Time = 0, Value = a, Envelope = 0 }, { Time = 1, Value = b or a, Envelope = 0 } } }, NumberSequenceMT)
+	end,
+}
+local NumberSequenceKeypoint = {
+	new = function(time, value, envelope)
+		return { Time = time, Value = value, Envelope = envelope or 0 }
+	end,
+}
+
+-- Fonts by family, weight and style; an Enum.Font (a string here, see Enum) by its name.
+local Font = {}
+FontMT.__index = Font
+FontMT.__eq = function(a, b)
+	return a.Family == b.Family and a.Weight == b.Weight and a.Style == b.Style
+end
+function Font.new(family: string, weight: any?, style: any?)
+	return setmetatable({ Family = family, Weight = weight or "FontWeight.Regular", Style = style or "FontStyle.Normal" }, FontMT)
+end
+function Font.fromEnum(item: any)
+	return Font.new(`rbxasset://fonts/families/{string.match(tostring(item), "[^.]+$")}.json`)
+end
+
+-- Luau's own utf8, and Roblox's graphemes (here, each character).
+local utf8 = setmetatable({
+	graphemes = function(text: string)
+		local starts = {}
+		for at in utf8.codes(text) do
+			table.insert(starts, at)
+		end
+		local i = 0
+		return function()
+			i += 1
+			if not starts[i] then
+				return nil
+			end
+			return starts[i], (starts[i + 1] or #text + 1) - 1
+		end
+	end,
+}, { __index = utf8 })
 
 -- Vector3 ------------------------------------------------------------------------------------
 
@@ -268,6 +347,10 @@ local SUPERCLASSES = {
 	ImageLabel = "GuiObject",
 	TextLabel = "GuiObject",
 	Frame = "GuiObject",
+	TextButton = "GuiButton",
+	ImageButton = "GuiButton",
+	GuiButton = "GuiObject",
+	TextBox = "GuiObject",
 	GuiObject = "GuiBase2d",
 	ScreenGui = "LayerCollector",
 	LayerCollector = "GuiBase2d",
@@ -362,7 +445,10 @@ InstanceMT.__index = function(inst, key)
 	elseif key == "WorldCFrame" and data.ClassName == "Attachment" then
 		local parent = data.Parent
 		return if parent and parent.CFrame then parent.CFrame * data.CFrame else data.CFrame
-	elseif key == "AbsoluteSize" or key == "AbsolutePosition" then
+	elseif key == "AbsoluteSize" and data.ClassName == "ScreenGui" then
+		-- A 1080p screen.
+		return Vector2.new(1920, 1080)
+	elseif key == "AbsoluteSize" or key == "AbsolutePosition" or key == "TextBounds" then
 		return { X = 0, Y = 0 }
 	end
 	return nil
@@ -791,6 +877,13 @@ methods.GetService = function(inst, name)
 				return alpha
 			end,
 		}
+	elseif name == "TextService" then
+		-- Each character half as wide as the text is tall.
+		return {
+			GetTextSize = function(_self, text, size)
+				return Vector2.new(utf8.len(text) * size * 0.5, size)
+			end,
+		}
 	end
 	return inst:FindFirstChild(name)
 end
@@ -798,8 +891,17 @@ end
 -- task runs everything immediately, except a delay of more than nothing, which waits for step() to
 -- reach it; warn is captured.
 local task = {
+	-- In a thread of its own, so a loop that waits (a hook's polling) stops at its first wait.
 	spawn = function(fn, ...)
-		fn(...)
+		local thread = coroutine.create(fn)
+		local ok, problem = coroutine.resume(thread, ...)
+		if not ok then
+			error(problem, 0)
+		end
+		return thread
+	end,
+	wait = function()
+		return coroutine.yield()
 	end,
 	delay = function(seconds, fn, ...)
 		if not seconds or seconds <= 0 then

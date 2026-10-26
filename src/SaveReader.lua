@@ -56,6 +56,16 @@ export type Item = {
 	Markers: { Marker },
 	Joints: { Joint },
 	PathTypes: { string },
+	-- An Eclipse item's id (its EclipseTrackId), which picks a camera shake's pattern.
+	TrackId: string?,
+}
+
+-- One of Eclipse Animator's subtitles (see EclipseReader): the frame it shows from, and the cue as
+-- Eclipse keeps it, in frames: { Duration, InFrames, OutFrames, Entrance, Exit, Order, Base (its
+-- style), Keys = { { Frame, Value (a style), Ease } } }, every style field filled in.
+export type Subtitle = {
+	Frame: number,
+	Cue: { [string]: any },
 }
 
 export type SaveEntry = {
@@ -72,6 +82,8 @@ export type Animation = SaveEntry & {
 	Items: { Item },
 	-- What the reader couldn't read as it is, to pass on with the export's other warnings.
 	Warnings: { string }?,
+	-- An Eclipse project's subtitles, by when they show.
+	Subtitles: { Subtitle }?,
 }
 
 local SAVE_FOLDER = "MoonAnimator2Saves"

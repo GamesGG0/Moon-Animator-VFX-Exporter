@@ -14,6 +14,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local CoreGui = game:GetService("CoreGui")
 
 local Carryover = require(script.Carryover)
+local EclipseHook = require(script.EclipseHook)
 local EclipseReader = require(script.EclipseReader)
 local Exporter = require(script.Exporter)
 local Formatter = require(script.Formatter)
@@ -24,10 +25,11 @@ local Widget = require(script.Widget)
 
 local SEQUENCE_TEMPLATE = script.Templates.Sequence
 -- The Sequence version exports are written for: Sequence.new(animation, character), with
--- :Play(track, data, vfx) playing the cues' Keys (Bezier ones too), Screen, Target and EmitCount
--- fields itself, emitting with the emitter the table or a cue names, calling Functions as
--- Function(sequence, effect, character, cue, data), and cleaning up threads a Function hands it.
-local SEQUENCE_VERSION = 11
+-- :Play(track, data, vfx) playing the cues' Keys (Bezier ones too), Screen (and its ScaleText),
+-- Subtitle, Target (Shake too), Lifetime and EmitCount fields itself, emitting with the emitter the
+-- table or a cue names, calling Functions as Function(sequence, effect, character, cue, data), and
+-- cleaning up threads a Function hands it.
+local SEQUENCE_VERSION = 12
 
 -- A Sequence module's version, from its `module.Version = n` line (versions before 2 had none).
 local function sequenceVersion(source: string): number
@@ -177,22 +179,47 @@ local function refreshSaves()
 	selectSave(keep)
 end
 
-local function selectOpenSave(): SaveReader.SaveEntry?
+-- The saved Eclipse project of this name, if there is one.
+local function eclipseProject(name: string?): SaveReader.SaveEntry?
+	for _, entry in state.Saves do
+		if entry.Source == "Eclipse" and entry.Name == name then
+			return entry
+		end
+	end
+	return nil
+end
+
+-- Selects the file open in Moon, else the project open in Eclipse, else Moon's newest file, else the
+-- first Eclipse project. From Moon's own button (`moonOnly`), only Moon's files.
+local function selectOpenSave(moonOnly: boolean?): SaveReader.SaveEntry?
 	local moonSaves = {}
 	for _, saved in state.Saves do
 		if saved.Source == nil then
 			table.insert(moonSaves, saved)
 		end
 	end
-	local entry, how = MoonHook.detectOpenSave(moonSaves)
-	-- With no Moon files, an Eclipse project (Eclipse doesn't say which one it has open).
-	if not entry and #state.Saves > 0 then
+	local entry, how = nil, ""
+	if MoonHook.isRunning() then
+		entry, how = MoonHook.detectOpenSave(moonSaves)
+	end
+	if how ~= "open in Moon Animator" and not moonOnly then
+		local open = eclipseProject(EclipseHook.openProjectName())
+		if open then
+			entry, how = open, "open in Eclipse Animator"
+		end
+	end
+	if not entry and #moonSaves > 0 then
+		entry, how = MoonHook.detectOpenSave(moonSaves)
+	end
+	if not entry and #state.Saves > 0 and not moonOnly then
 		entry = state.Saves[1]
 		how = if #state.Saves == 1 then "the Eclipse Animator project in this place" else `the first of {#state.Saves} Eclipse Animator projects`
 	end
 	selectSave(entry)
 	if entry then
 		ui:SetStatus(`Selected "{entry.Name}" ({how}).`, "info")
+	elseif moonOnly then
+		ui:SetStatus("No Moon Animator 2 saves found. Save your animation in Moon first (Ctrl+S).", "warn")
 	else
 		ui:SetStatus("No Moon Animator 2 saves or Eclipse Animator projects found. Save your animation in Moon or Eclipse first.", "warn")
 	end
@@ -346,11 +373,16 @@ local function export(openScript: boolean): (ModuleScript?, any)
 	ui:SetPreview(source)
 
 	local flagged, objectless, screens, keyframed, adapted, rigNames, emitters = 0, 0, 0, 0, 0, {}, {}
+	local subtitles, shakes = 0, 0
 	for _, cue in result.Cues do
 		if #cue.Notes > 0 then
 			flagged += 1
 		end
-		if cue.Screen then
+		if cue.Subtitle then
+			subtitles += 1
+		elseif cue.Animation and cue.Animation.Kind == "Shake" then
+			shakes += 1
+		elseif cue.Screen then
 			screens += 1
 		elseif cue.Animation then
 			keyframed += 1
@@ -370,7 +402,7 @@ local function export(openScript: boolean): (ModuleScript?, any)
 		end
 	end
 
-	local message = `Exported {#result.Cues} cues and {packed} VFX objects to {module:GetFullName()}.`
+	local message = `Exported {#result.Cues} cues and {packed} VFX objects to {module:GetFullName()}{if eclipse then ", from the project as Eclipse last saved it" else ""}.`
 	if #emitters > 0 then
 		message ..= ` The events emitted with {table.concat(emitters, ", ")}, so the Sequence emits their VFX with {if #emitters == 1 then "it" else "them"} (required once, not cloned), and those cues need no Function for it.`
 	end
@@ -388,6 +420,12 @@ local function export(openScript: boolean): (ModuleScript?, any)
 	end
 	if screens > 0 then
 		message ..= ` {screens} of them {if screens == 1 then "is a screen effect" else "are screen effects"}, which the Sequence module plays.`
+	end
+	if subtitles > 0 then
+		message ..= ` {subtitles} {if subtitles == 1 then "is a subtitle" else "are subtitles"}, which the Sequence draws as Eclipse does.`
+	end
+	if shakes > 0 then
+		message ..= ` {shakes} {if shakes == 1 then "is a camera shake" else "are camera shakes"}, which the Sequence plays as Eclipse does.`
 	end
 	if keyframed > 0 then
 		message ..= ` {keyframed} {if keyframed == 1 then "is an effect" else "are effects"} {tool} animates with keyframes (Highlights, lights, Lighting, the camera's field of view, moving parts); the Sequence module replays their keys.`
@@ -604,11 +642,29 @@ end
 local hook = MoonHook.new(function()
 	dock.Enabled = true
 	refreshSaves()
-	if selectOpenSave() then
+	if selectOpenSave(true) then
 		export(true)
 	end
 end)
 hook:SetPlacement(state.Placement :: any)
+
+-- Eclipse's Item › Export VFX: exports the project open in Eclipse, as it was last saved.
+local eclipseHook = EclipseHook.new(function(projectName)
+	dock.Enabled = true
+	refreshSaves()
+	local entry = eclipseProject(projectName)
+	if not entry then
+		ui:SetStatus(
+			if projectName
+				then `"{projectName}" isn't saved as an Eclipse Animator project in this place yet. Save it in Eclipse, then export again.`
+				else "Open (or save) a project in Eclipse Animator first, then export again.",
+			"warn"
+		)
+		return
+	end
+	selectSave(entry)
+	export(true)
+end)
 
 ui.OnSaveSelected = function(entry)
 	selectSave(entry)
@@ -722,6 +778,7 @@ end)
 plugin.Unloading:Connect(function()
 	stopPreview()
 	hook:Destroy()
+	eclipseHook:Destroy()
 	ui:Destroy()
 end)
 

@@ -122,8 +122,44 @@ function Formatter.value(v: any): string?
 			table.insert(points, `NumberSequenceKeypoint.new({number(point.Time)}, {number(point.Value)}, {number(point.Envelope)})`)
 		end
 		return `NumberSequence.new(\{ {table.concat(points, ", ")} })`
+	elseif kind == "Font" then
+		return `Font.new({string.format("%q", v.Family)}, {Formatter.value(v.Weight) or "Enum.FontWeight.Regular"}, {Formatter.value(v.Style) or "Enum.FontStyle.Normal"})`
 	end
 	return nil
+end
+
+-- A table of plain values (strings, numbers, booleans, and tables of them) as Lua source on one
+-- line, its fields in `first` order and then by name.
+local function plainTable(t: { [any]: any }, first: { string }?): string
+	if #t > 0 then
+		local items = {}
+		for _, item in t do
+			table.insert(items, if type(item) == "table" then plainTable(item) else Formatter.value(item) or "nil")
+		end
+		return `\{ {table.concat(items, ", ")} }`
+	end
+	local names = {}
+	for name in t do
+		table.insert(names, tostring(name))
+	end
+	local rank = {}
+	for i, name in first or {} do
+		rank[name] = i
+	end
+	table.sort(names, function(a, b)
+		if (rank[a] or math.huge) ~= (rank[b] or math.huge) then
+			return (rank[a] or math.huge) < (rank[b] or math.huge)
+		end
+		return a < b
+	end)
+	local fields = {}
+	for _, name in names do
+		local item = t[name]
+		local text = if type(item) == "table" then plainTable(item) else Formatter.value(item) or "nil"
+		local key = if string.match(name, "^[%a_][%w_]*$") and not KEYWORDS[name] then name else string.format("[%q]", name)
+		table.insert(fields, `{key} = {text}`)
+	end
+	return if #fields > 0 then `\{ {table.concat(fields, ", ")} }` else "{}"
 end
 
 local function sortedKeys(t: { [string]: any }): { string }
@@ -191,7 +227,7 @@ local function propertiesSource(properties: any, indent: string, skipped: Skippe
 end
 
 -- A screen effect's pieces as Lua source lines at `indent`: each one's Name, ClassName, whether it
--- Mirrors the keyed piece, its look (Properties) and its own pieces (Children).
+-- Mirrors the keyed piece, its look (Properties), its own pieces (Children) and keys (Keys).
 local function childrenSource(children: { any }, indent: string, skipped: Skipped?): { string }
 	local lines = {}
 	for _, child in children do
@@ -213,6 +249,10 @@ local function childrenSource(children: { any }, indent: string, skipped: Skippe
 		local nested = if child.Children then childrenSource(child.Children, indent .. "\t", skipped) else {}
 		if #nested > 0 then
 			table.insert(parts, { "Children", nested })
+		end
+		local keys = if child.Keys then keysSource(child.Keys, indent .. "\t", skippedHere) else {}
+		if #keys > 0 then
+			table.insert(parts, { "Keys", keys })
 		end
 
 		if #parts == 0 then
@@ -407,12 +447,12 @@ function Formatter.identifier(name: string): string
 end
 
 -- The keyframed effects that play on Lighting or the camera instead of a VFX: their cue's Target.
-local TARGETS = { Lighting = true, Camera = true }
+local TARGETS = { Lighting = true, Camera = true, Shake = true }
 
--- Whether a cue spawns a VFX (and so has an Offset). Screen, Lighting and camera effects don't, and
--- neither does an event that only ran code.
+-- Whether a cue spawns a VFX (and so has an Offset). Subtitles and screen, Lighting and camera
+-- effects don't, and neither does an event that only ran code.
 local function spawnsVfx(cue: any): boolean
-	if cue.Screen or (cue.Animation and TARGETS[cue.Animation.Kind]) then
+	if cue.Screen or cue.Subtitle or (cue.Animation and TARGETS[cue.Animation.Kind]) then
 		return false
 	end
 	return not (cue.Code and not cue.Asset)
@@ -441,10 +481,41 @@ local function headFields(cue: any): { string }
 	if hold then
 		table.insert(head, `Hold = {number(hold)}`)
 	end
+	if cue.Animation and cue.Animation.Kind == "Shake" then
+		table.insert(head, `Seed = {number(cue.Animation.Seed or 0)}`)
+		table.insert(head, `Phase = {number(cue.Animation.Phase or 0)}`)
+	end
+	if cue.Screen and cue.Screen.ScaleText then
+		table.insert(head, "ScaleText = true")
+	end
+	if cue.Lifetime then
+		table.insert(head, `Lifetime = {number(cue.Lifetime)}`)
+	end
 	if cue.EmitCount then
 		table.insert(head, `EmitCount = {number(cue.EmitCount)}`)
 	end
 	return head
+end
+
+-- A subtitle's data (see Exporter.subtitleCue) as Lua source lines: its timing and motions, then its
+-- style, then its keys, one a line.
+local function subtitleSource(subtitle: any, indent: string): { string }
+	local timing = {}
+	for _, name in { "Duration", "In", "Out", "Entrance", "Exit", "Order" } do
+		if subtitle[name] ~= nil then
+			table.insert(timing, `{name} = {Formatter.value(subtitle[name])}`)
+		end
+	end
+	local lines = { `{indent}{table.concat(timing, ", ")},` }
+	table.insert(lines, `{indent}Style = {plainTable(subtitle.Style or {}, { "Text", "Speaker" })},`)
+	if subtitle.Keys and #subtitle.Keys > 0 then
+		table.insert(lines, `{indent}Keys = \{`)
+		for _, key in subtitle.Keys do
+			table.insert(lines, `{indent}\t\{ {number(key[1])}, {plainTable(key[2], { "Text", "Speaker" })}, {string.format("%q", key[3])} },`)
+		end
+		table.insert(lines, `{indent}},`)
+	end
+	return lines
 end
 
 -- The emitter every cue's VFX can share (see Exporter.Cue's Emitter): the module the events
@@ -479,7 +550,9 @@ local function tailFields(cue: any, label: string, warn: (string) -> (), tool: s
 	local function skippedProperty(name: string, kind: string)
 		warn(`{label}'s {name} is a {kind}, which can't be exported, so it's left out of its look.`)
 	end
-	if cue.Screen then
+	if cue.Subtitle then
+		table.insert(tail, "Subtitle = " .. block(subtitleSource(cue.Subtitle, "\t\t\t")))
+	elseif cue.Screen then
 		local properties = propertiesSource(cue.Screen.Properties, "\t\t\t", skippedProperty)
 		if #properties > 0 then
 			table.insert(tail, "Properties = " .. block(properties))
@@ -568,7 +641,7 @@ local function usage(spec: Spec, name: string): { string }
 			table.insert(assets, cue.Asset)
 		end
 		rig = rig or cue.Rig
-		screen = screen or cue.Screen ~= nil or (cue.Animation ~= nil and TARGETS[cue.Animation.Kind] == true)
+		screen = screen or cue.Screen ~= nil or cue.Subtitle ~= nil or (cue.Animation ~= nil and TARGETS[cue.Animation.Kind] == true)
 	end
 
 	if rig then

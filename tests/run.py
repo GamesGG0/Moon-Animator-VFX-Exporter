@@ -21,6 +21,7 @@ MODULES = {
     "Formatter": "Formatter.lua",
     "Carryover": "Carryover.lua",
     "MoonHook": "MoonHook.lua",
+    "EclipseHook": "EclipseHook.lua",
     "Packager": "Packager.lua",
     "Sequence": "Templates/Sequence.luau",
     "Widget": "Widget.lua",

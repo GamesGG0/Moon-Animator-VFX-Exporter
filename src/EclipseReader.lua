@@ -551,6 +551,12 @@ local function readEvent(node: Instance, rig: Instance?, warnings: { string }, i
 
 	local begin = readText(node:FindFirstChild("CodeBegin"))
 	local finish = readText(node:FindFirstChild("CodeEnd"))
+	-- An older project's subtitle on an item's event, with nothing else to it: it's read as a
+	-- subtitle (see readSubtitles), so there's no event.
+	local rows = readJson(node:FindFirstChild("Emits"))
+	if node:FindFirstChild("Subtitle") and next(keys) == nil and not string.find(begin .. finish, "%S") and not (type(rows) == "table" and #rows > 0) then
+		return nil
+	end
 	local marker: SaveReader.Marker = {
 		Frame = math.max(0, math.floor(frame + 0.5)),
 		Name = name,
@@ -563,7 +569,6 @@ local function readEvent(node: Instance, rig: Instance?, warnings: { string }, i
 		Switches = {},
 	}
 
-	local rows = readJson(node:FindFirstChild("Emits"))
 	for _, row in if type(rows) == "table" then rows else {} do
 		if type(row) ~= "table" or type(row.Path) ~= "table" or not (row.Mode == "All" or row.Mode == "Selected" or row.Mode == "Exact") then
 			continue
@@ -581,6 +586,235 @@ local function readEvent(node: Instance, rig: Instance?, warnings: { string }, i
 		end
 	end
 	return marker
+end
+
+-- Subtitles ------------------------------------------------------------------------------------
+
+-- A subtitle's style fields and their defaults, as Eclipse has them (its SubtitleData).
+local SUBTITLE_DEFAULTS: { [string]: any } = {
+	Text = "Your subtitle", Speaker = "", Image = "", ImageSide = "Left", ImageShape = "Circle", ImageSize = 64,
+	Size = 28, Font = "Gotham", Bold = true, Italic = false, Underline = false, Color = "FFFFFF",
+	NameColor = "FFFFFF", NameBold = true, NameItalic = false, NameSize = 21, NameOffset = 4,
+	NameOutline = 1, NameOutlineColor = "000000", NameFont = "Gotham", OutlineColor = "15111D",
+	Outline = 1, Background = "15111D", BackgroundOpacity = 0, Padding = 12, Radius = 8, Width = 0.65,
+	Position = "Bottom", Align = "Center", X = 0, Y = 0, Scale = 1, Rotation = 0, Opacity = 1,
+	Rainbow = false, RainbowSpeed = 0.2, RainbowSpread = 0.05, Gradient = false, GradientColor = "A7C8FF",
+	GradientAngle = 90, Jitter = 0, JitterSpeed = 18, JitterDecay = 0, Wave = 0, Pulse = 0,
+}
+EclipseReader.SUBTITLE_DEFAULTS = SUBTITLE_DEFAULTS
+
+-- What each field can be: numbers within a range, colours as hex, or one of a list.
+local SUBTITLE_RANGES = {
+	NameOffset = { -20, 30 }, NameOutline = { 0, 5 }, JitterDecay = { 0, 10 }, NameSize = { 12, 72 },
+	RainbowSpread = { 0, 2 }, GradientAngle = { 0, 360 }, Size = { 12, 96 }, ImageSize = { 24, 160 },
+	Outline = { 0, 5 }, BackgroundOpacity = { 0, 1 }, Padding = { 0, 40 }, Radius = { 0, 32 },
+	Width = { 0.2, 0.95 }, X = { -0.4, 0.4 }, Y = { -0.4, 0.4 }, Scale = { 0.4, 2 }, Rotation = { -45, 45 },
+	Opacity = { 0, 1 }, RainbowSpeed = { 0, 3 }, Jitter = { 0, 20 }, JitterSpeed = { 1, 60 }, Wave = { 0, 20 },
+	Pulse = { 0, 0.4 },
+}
+local SUBTITLE_COLORS = { NameOutlineColor = true, GradientColor = true, Color = true, NameColor = true, OutlineColor = true, Background = true }
+local SUBTITLE_FONTS = {
+	"Gotham", "SourceSans", "BuilderSans", "Arial", "Arimo", "Roboto", "RobotoCondensed", "RobotoMono", "Ubuntu",
+	"Nunito", "Oswald", "TitilliumWeb", "JosefinSans", "Jura", "Michroma", "Sarpanch", "Highway", "Code", "Bodoni",
+	"Garamond", "Merriweather", "Antique", "AmaticSC", "Bangers", "Cartoon", "Creepster", "DenkOne", "Fantasy",
+	"Fondamento", "FredokaOne", "GrenzeGotisch", "IndieFlower", "Kalam", "LuckiestGuy", "PatrickHand",
+	"PermanentMarker", "SciFi", "SpecialElite", "Arcade",
+}
+local SUBTITLE_CHOICES = {
+	NameFont = SUBTITLE_FONTS,
+	Font = SUBTITLE_FONTS,
+	ImageSide = { "Left", "Right", "Above" },
+	ImageShape = { "Circle", "Square" },
+	Position = { "Bottom", "Center", "Top" },
+	Align = { "Center", "Left", "Right" },
+}
+-- How a subtitle comes in and goes out.
+local SUBTITLE_MOTIONS = {
+	"None", "Fade", "Slide up", "Slide down", "Slide left", "Slide right", "Pop", "Zoom", "Spin", "Typewriter",
+	"Word by word", "Wipe", "Letter pop", "Letter slide", "Letter drop", "Word spring",
+}
+
+local function within(value: any, fallback: number, low: number, high: number): number
+	local n = tonumber(value)
+	if not n or n ~= n or math.abs(n) == math.huge then
+		return fallback
+	end
+	return math.clamp(n, low, high)
+end
+
+local function hex(value: any, fallback: string?): string
+	local text = string.upper((string.gsub(tostring(value or ""), "#", "")))
+	return if string.match(text, "^%x%x%x%x%x%x$") then text else fallback or "FFFFFF"
+end
+
+-- Text cut to `limit` bytes, without splitting a character.
+local function clip(text: string, limit: number): string
+	local out = string.sub(text, 1, limit)
+	while #out > 0 and not utf8.len(out) do
+		out = string.sub(out, 1, -2)
+	end
+	return out
+end
+
+-- A style as Eclipse reads one: every field there, within what it can be; and its words' own looks.
+local function subtitleStyle(value: any): { [string]: any }
+	local style = if type(value) == "table" then value else {}
+	local out: { [string]: any } = {}
+	for key, default in SUBTITLE_DEFAULTS do
+		local v = style[key]
+		local range = SUBTITLE_RANGES[key]
+		if range then
+			out[key] = within(v, default, range[1], range[2])
+		elseif SUBTITLE_COLORS[key] then
+			out[key] = hex(v, default)
+		elseif SUBTITLE_CHOICES[key] then
+			out[key] = if table.find(SUBTITLE_CHOICES[key], v) then v else default
+		elseif type(default) == "boolean" then
+			out[key] = if v == nil then default else v == true
+		else
+			out[key] = if type(v) == "string" then clip(v, if key == "Text" then 2000 else 160) else default
+		end
+	end
+	if style.NameBold == nil and style.NameColor == "CBB5FF" then
+		out.NameColor = "FFFFFF"
+	end
+	out.Image = string.gsub(out.Image, "rbxassetid://", "")
+	if not string.match(out.Image, "^%d+$") then
+		out.Image = ""
+	end
+	out.Words = {}
+	for index, word in if type(style.Words) == "table" then style.Words else {} do
+		local i = tonumber(index)
+		if i and i % 1 == 0 and i >= 1 and i <= 300 and type(word) == "table" then
+			local own = {}
+			if word.Color then
+				own.Color = hex(word.Color)
+			end
+			for _, key in { "Bold", "Italic", "Underline", "Rainbow" } do
+				if type(word[key]) == "boolean" then
+					own[key] = word[key]
+				end
+			end
+			if word.Jitter ~= nil then
+				own.Jitter = within(word.Jitter, 0, 0, 20)
+			end
+			out.Words[tostring(i)] = own
+		end
+	end
+	return out
+end
+
+-- A subtitle cue as Eclipse reads one (see SaveReader.Subtitle), or nil if it isn't one.
+local function subtitleCue(value: any): { [string]: any }?
+	if type(value) ~= "table" then
+		return nil
+	end
+	local function motion(kind: any): string
+		return if table.find(SUBTITLE_MOTIONS, kind) then kind else "Fade"
+	end
+	local cue = {
+		Duration = math.floor(within(value.Duration, 180, 1, 1000000)),
+		Base = subtitleStyle(value.Base),
+		Keys = {},
+		Entrance = motion(value.Entrance),
+		Exit = motion(value.Exit),
+		InFrames = math.floor(within(value.InFrames, 12, 0, 100000)),
+		OutFrames = math.floor(within(value.OutFrames, 12, 0, 100000)),
+		Order = math.floor(within(value.Order, 0, -1000, 1000)),
+	}
+	-- Keys inside it, one a frame, at most 128.
+	local byFrame = {}
+	for _, key in if type(value.Keys) == "table" then value.Keys else {} do
+		if type(key) == "table" and tonumber(key.Frame) then
+			local frame = math.floor(within(key.Frame, 0, 0, 1000000))
+			if frame > 0 and frame < cue.Duration then
+				byFrame[frame] = {
+					Frame = frame,
+					Value = subtitleStyle(key.Value),
+					Ease = if key.Ease == "Hold" or key.Ease == "Linear" then key.Ease else "Smooth",
+				}
+			end
+		end
+	end
+	for _, key in byFrame do
+		table.insert(cue.Keys, key)
+	end
+	table.sort(cue.Keys, function(a, b)
+		return a.Frame < b.Frame
+	end)
+	while #cue.Keys > 128 do
+		table.remove(cue.Keys)
+	end
+	-- Coming in and going out fit in it.
+	local total = cue.InFrames + cue.OutFrames
+	if total > cue.Duration then
+		cue.InFrames = math.floor(cue.InFrames * cue.Duration / total)
+		cue.OutFrames = cue.Duration - cue.InFrames
+	end
+	return cue
+end
+EclipseReader.subtitleCue = subtitleCue
+
+-- The project's subtitles. Eclipse keeps them on a subtitle track of their own (EclipseSubtitles,
+-- with a copy on each item's animation); older projects had them on their items' events.
+local function readSubtitles(save: Instance, sequences: { Instance }): { SaveReader.Subtitle }
+	local found: { any } = {}
+	local seen = {}
+	local function add(node: Instance, legacy: boolean)
+		local frame = node:GetAttribute("Frame")
+		if not node:IsA("Folder") or type(frame) ~= "number" or frame ~= frame or node:GetAttribute("Enabled") == false then
+			return
+		end
+		local cue = subtitleCue(readJson(node:FindFirstChild("Subtitle")))
+		if not cue then
+			return
+		end
+		frame = math.max(0, math.floor(frame + 0.5))
+		-- The same event in each copy of the track has the same id; one still on an item (not yet
+		-- moved to the track) is the same subtitle if it's the same text at the same frame.
+		local id = if legacy then `{frame}\0{cue.Base.Text}` else node.Name
+		if seen[id] or seen[`{frame}\0{cue.Base.Text}`] then
+			return
+		end
+		seen[id], seen[`{frame}\0{cue.Base.Text}`] = true, true
+		table.insert(found, { Frame = frame, Cue = cue, Added = #found })
+	end
+	local function track(holder: Instance?, legacy: boolean)
+		local events = holder and holder:FindFirstChild("EclipseEvents")
+		if events and events:GetAttribute("Enabled") ~= false then
+			local nodes = events:GetChildren()
+			table.sort(nodes, function(a, b)
+				return a.Name < b.Name
+			end)
+			for _, node in nodes do
+				add(node, legacy)
+			end
+		end
+	end
+
+	track(save:FindFirstChild("EclipseSubtitles"), false)
+	for _, sequence in sequences do
+		track(sequence:FindFirstChild("EclipseSubtitles"), false)
+	end
+	for _, sequence in sequences do
+		track(sequence, true)
+	end
+
+	-- By when they show (each cue keeps its Order, which sets how ones showing at once stack).
+	table.sort(found, function(a, b)
+		if a.Frame ~= b.Frame then
+			return a.Frame < b.Frame
+		end
+		if a.Cue.Order ~= b.Cue.Order then
+			return a.Cue.Order < b.Cue.Order
+		end
+		return a.Added < b.Added
+	end)
+	local subtitles = {}
+	for _, entry in found do
+		table.insert(subtitles, { Frame = entry.Frame, Cue = entry.Cue })
+	end
+	return subtitles
 end
 
 -- Whether a KeyframeSequence's Eclipse data has more than its base animation layer.
@@ -616,6 +850,8 @@ function EclipseReader.load(save: Instance): SaveReader.Animation
 	local lastFrame = 0
 	local byInstance: { [Instance]: SaveReader.Item } = {}
 	local switches = {}
+	-- Each item's animation, which also holds the subtitles.
+	local sequences: { Instance } = {}
 
 	for _, entry in entries do
 		local rig = findRig(entry, save)
@@ -652,6 +888,10 @@ function EclipseReader.load(save: Instance): SaveReader.Animation
 			elseif rig then rig.ClassName
 			else tostring(entry:GetAttribute("RigClass") or "?")
 
+		local trackId = if rig then rig:GetAttribute("EclipseTrackId") else nil
+		if type(trackId) ~= "string" then
+			trackId = entry:GetAttribute("RigId")
+		end
 		local item: SaveReader.Item = {
 			Index = #anim.Items + 1,
 			Path = table.concat(names, "."),
@@ -663,6 +903,7 @@ function EclipseReader.load(save: Instance): SaveReader.Animation
 			Defaults = {},
 			Markers = {},
 			Joints = {},
+			TrackId = if type(trackId) == "string" then trackId else nil,
 		}
 		table.insert(anim.Items, item)
 		if rig then
@@ -671,6 +912,7 @@ function EclipseReader.load(save: Instance): SaveReader.Animation
 		if not sequence then
 			continue
 		end
+		table.insert(sequences, sequence)
 
 		if hasLayers(sequence) then
 			table.insert(warnings, `{name} has animation layers in Eclipse. Only the layer being edited when it was saved is read, so its poses may be off.`)
@@ -681,11 +923,6 @@ function EclipseReader.load(save: Instance): SaveReader.Animation
 		for _, row in if type(properties) == "table" and type(properties.tracks) == "table" then properties.tracks else {} do
 			local id = row.id
 			if type(id) ~= "string" or row.enabled == false or row.disabled or string.find(id, "^FaceControls%.") or id == "ApplyMesh" or id == "ApplyTexture" then
-				continue
-			end
-			-- On a whole model, these blend each of its parts from its own value, which isn't replayed.
-			if rig and rig:IsA("Model") and not isEffectObject(rig) and (id == "Transparency" or id == "Color" or id == "Reflectance") then
-				table.insert(warnings, `{name}'s {id} is keyed on the whole model in Eclipse, which isn't exported yet; key its parts instead.`)
 				continue
 			end
 			local property = PROPERTY_NAMES[id] or id
@@ -799,6 +1036,11 @@ function EclipseReader.load(save: Instance): SaveReader.Animation
 				return a.Frame < b.Frame
 			end)
 		end
+	end
+
+	anim.Subtitles = readSubtitles(save, sequences)
+	for _, subtitle in anim.Subtitles do
+		lastFrame = math.max(lastFrame, subtitle.Frame + subtitle.Cue.Duration)
 	end
 
 	if anim.Length <= 0 then
