@@ -576,6 +576,81 @@ do
 	save.Parent = nil
 end
 
+-- VFX that follow a body part: put inside it, or welded to it from outside the rig ----------------
+
+do
+	local workspace = game:GetService("Workspace")
+	local rig = Instance.new("Model", { Name = "Puncher", Parent = workspace })
+	local rootCF = CFrame.new(0, 3, 0)
+	local root = Instance.new("Part", { Name = "HumanoidRootPart", CFrame = rootCF, Parent = rig })
+	rig.PrimaryPart = root
+	Instance.new("Humanoid", { Name = "Humanoid", Parent = rig })
+	local restC1 = CFrame.new(-1.5, 0, 0)
+	local arm = Instance.new("Part", { Name = "Right Arm", CFrame = rootCF * restC1:Inverse(), Parent = rig })
+	Instance.new("Motor6D", { Name = "Right Shoulder", Part0 = root, Part1 = arm, C0 = CFrame.new(), C1 = restC1, Parent = root })
+	local raised = restC1 * CFrame.Angles(math.pi / 2, 0, 0)
+	local raisedArm = rootCF * raised:Inverse()
+
+	-- Put inside the arm, with no weld.
+	local fist = Instance.new("Part", { Name = "Fist", CFrame = arm.CFrame * CFrame.new(0, -1, 0), Parent = arm })
+	-- Out of the rig, welded to the arm; a model welded to that; an emitter in it.
+	local blade = Instance.new("Part", { Name = "Blade", Anchored = false, CFrame = arm.CFrame * CFrame.new(0, -2, -1), Parent = workspace })
+	Instance.new("WeldConstraint", { Part0 = blade, Part1 = arm, Parent = blade })
+	local glow = Instance.new("Model", { Name = "Glow", Parent = workspace })
+	local ring = Instance.new("Part", { Name = "Ring", Anchored = false, CFrame = blade.CFrame * CFrame.new(0, 0, -1), Parent = glow })
+	glow.PrimaryPart = ring
+	Instance.new("WeldConstraint", { Part0 = ring, Part1 = blade, Parent = ring })
+	local spark = Instance.new("ParticleEmitter", { Name = "Spark", Parent = blade })
+	-- Anchored, it stays put even though it's welded to the arm.
+	local post = Instance.new("Part", { Name = "Post", Anchored = true, CFrame = CFrame.new(0, 0, 9), Parent = workspace })
+	Instance.new("WeldConstraint", { Part0 = post, Part1 = arm, Parent = post })
+
+	local pose = RigPose.new(rig, root, nil, { { Hier = { "Right Arm" }, Track = { { Time = 0, Value = restC1 }, { Time = 10, Value = raised } } } })
+	check("a part put inside a body part hangs off it", pose:AttachedTo(fist) == arm and cfNear(pose:CFrameAt(fist, 10), raisedArm * CFrame.new(0, -1, 0)))
+	check("a part welded to a body part from outside the rig moves with it", pose.Linked[blade] and pose:AttachedTo(blade) == arm and cfNear(pose:CFrameAt(blade, 10), raisedArm * CFrame.new(0, -2, -1)))
+	check("and so does one welded to that", pose.Linked[ring] and pose:AttachedTo(ring) == arm and cfNear(pose:CFrameAt(ring, 10), raisedArm * CFrame.new(0, -2, -2)))
+	check("an anchored part welded to it doesn't", not pose.Linked[post])
+
+	-- Through a Moon save: each one's cue follows the arm, measured from it.
+	local save = value("StringValue", "Punches", mockJson({
+		Information = { Length = 60, FPS = 60, Modified = 1 },
+		Items = {
+			{ Path = { InstanceNames = { "game", "Workspace", "Puncher" }, InstanceTypes = { "DataModel", "Workspace", "Model" }, ItemType = "Rig" } },
+			{ Path = { InstanceNames = { "game", "Workspace", "Puncher", "Right Arm", "Fist" }, InstanceTypes = { "DataModel", "Workspace", "Model", "Part", "Part" }, ItemType = "BasePart" } },
+			{ Path = { InstanceNames = { "game", "Workspace", "Blade" }, InstanceTypes = { "DataModel", "Workspace", "Part" }, ItemType = "BasePart" } },
+			{ Path = { InstanceNames = { "game", "Workspace", "Glow" }, InstanceTypes = { "DataModel", "Workspace", "Model" }, ItemType = "Model" } },
+		},
+	}), saves)
+	local jointFolder = folder("_joint", folder("Rig", folder("1", save)))
+	value("StringValue", "_hier", "Right Arm", jointFolder)
+	value("CFrameValue", "default", restC1, jointFolder)
+	local keyframes = folder("_keyframes", jointFolder)
+	keyframe(keyframes, 0, { restC1 })
+	keyframe(keyframes, 10, { raised })
+	marker(folder("MarkerTrack", save:FindFirstChild("1")), 12, "", "shared.vfx.emit(workspace.Blade.Spark)")
+	marker(folder("MarkerTrack", folder("2", save)), 10, "Punch")
+	marker(folder("MarkerTrack", folder("3", save)), 10, "Slash")
+	marker(folder("MarkerTrack", folder("4", save)), 11, "Shine")
+
+	local byEffect = {}
+	for _, cue in Exporter.collect(SaveReader.load(save), { EffectName = "Event", FrameRate = 60 }).Cues do
+		byEffect[cue.Effect] = cue
+	end
+	local function follows(name: string, offset: CFrame)
+		local cue = byEffect[name]
+		check(`{name} follows the arm, measured from it`, cue and cue.Parent == "Right Arm" and cfNear(cue.Offset, offset), cue and `{cue.Parent} {cue.Offset}`)
+	end
+	follows("Punch", CFrame.new(0, -1, 0))
+	follows("Slash", CFrame.new(0, -2, -1))
+	follows("Shine", CFrame.new(0, -2, -2))
+	follows("Spark", CFrame.new(0, -2, -1))
+	check("an emitter in the welded part spawns in it", byEffect.Spark and byEffect.Spark.Object == blade and byEffect.Spark.Only and byEffect.Spark.Only[1] == spark)
+
+	for _, inst in { rig, blade, glow, post, save } do
+		inst.Parent = nil
+	end
+end
+
 -- Two rigs, loose parts and nested attachments (shaped like the AeroFinisher save) -------------
 
 do
@@ -1217,7 +1292,7 @@ end)]])
 		end
 	end
 	check("code that can't run in game is a warning when exporting", codeWarning ~= nil and string.find(codeWarning, "frame 30", 1, true) ~= nil, codeWarning)
-	check("and its Function warns when it runs instead of doing nothing quietly", string.find(source, '\t\t\twarn("[Moon VFX] Cue [30] \\"Barrel\\" runs event code from Moon that uses Crate', 1, true) ~= nil)
+	check("and its Function warns when it runs instead of doing nothing quietly", string.find(source, '\t\t\twarn("[VFX Exporter] Cue [30] \\"Barrel\\" runs event code from Moon that uses Crate', 1, true) ~= nil)
 	check("what the code makes goes to the sequence's cleaner", string.find(source, "\t\t\thighlight.Parent = victim\n\t\t\tself:AddToCleaner(highlight)\n", 1, true) ~= nil and string.find(source, "\t\t\tend)\n\t\t\tself:AddToCleaner(connection)\n", 1, true) ~= nil)
 	check("the Function gets the sequence as self", string.find(source, "Function = function(self, effect, character, cue, data)", 1, true) ~= nil)
 	check("its loops don't use ipairs or pairs", string.find(source, "ipairs", 1, true) == nil and string.find(source, "for _, child in attachment:GetChildren() do", 1, true) ~= nil)
@@ -2260,7 +2335,7 @@ do
 	local bar = Instance.new("Frame", { Name = "MenuBar" })
 	local options = Instance.new("TextButton", { Name = "Options", Text = "Options", TextColor3 = "white", TextTransparency = 0, Parent = bar })
 	-- A copy taken while Moon's menus were disabled.
-	local copy = Instance.new("TextButton", { Name = "MoonVFXExporterButton", Text = "Export VFX", TextColor3 = "grey", TextTransparency = 0, Parent = bar })
+	local copy = Instance.new("TextButton", { Name = "VFXExporterButton", Text = "Export VFX", TextColor3 = "grey", TextTransparency = 0, Parent = bar })
 
 	local hook = setmetatable({ Watchers = {} }, MoonHook)
 	hook:WatchLook(options, copy)
@@ -3101,7 +3176,7 @@ do
 	local hook = EclipseHook.new(function(name)
 		exported = name
 	end)
-	local row = content:FindFirstChild("MoonVFXExporterRow")
+	local row = content:FindFirstChild("VFXExporterRow")
 	local button = row and row:FindFirstChildWhichIsA("GuiButton")
 	check("Eclipse's ITEM menu gets an Export VFX row, at the bottom", row and row.LayoutOrder == 5 and button and button:FindFirstChild("Title").Text == "Export VFX")
 	check("with Eclipse's export icon", button and button:FindFirstChild("Icon").Image == "rbxassetid://136636358423324")
@@ -3112,13 +3187,13 @@ do
 	hook:Refresh()
 	local rows = 0
 	for _, child in content:GetChildren() do
-		if child.Name == "MoonVFXExporterRow" then
+		if child.Name == "VFXExporterRow" then
 			rows += 1
 		end
 	end
 	check("it's added once", rows == 1, rows)
 	hook:Destroy()
-	check("and goes when the plugin does", content:FindFirstChild("MoonVFXExporterRow") == nil)
+	check("and goes when the plugin does", content:FindFirstChild("VFXExporterRow") == nil)
 	core.Parent = nil
 end
 

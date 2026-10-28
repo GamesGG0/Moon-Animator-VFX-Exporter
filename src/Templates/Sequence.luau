@@ -109,7 +109,7 @@ local RunService = game:GetService("RunService")
 
 local module = {}
 
--- The Moon VFX Exporter replaces older versions of this module that it finds next to its exports.
+-- The VFX Exporter replaces older versions of this module that it finds next to its exports.
 module.Version = 12
 
 -- VFX play only on the client. On the server, Play and Spawn warn and do nothing.
@@ -121,7 +121,7 @@ local function OnServer(Method)
 	return true
 end
 
--- Set by the Moon VFX Exporter's Preview button, which plays an export in Studio without a game:
+-- Set by the VFX Exporter's Preview button, which plays an export in Studio without a game:
 -- { GuiParent = Instance, Spawned = function(object) }. Screen, Lighting and camera effects then
 -- show with no player (screen effects go in GuiParent), and Spawned is given everything the
 -- sequence makes. Leave it nil in a game.

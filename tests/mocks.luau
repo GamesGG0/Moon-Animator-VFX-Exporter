@@ -671,6 +671,23 @@ end
 methods.Emit = record("Emit")
 methods.Play = record("Play")
 
+-- The joints and welds holding a part, wherever they are.
+function methods.GetJoints(inst)
+	local top = inst
+	while top.Parent do
+		top = top.Parent
+	end
+	local joints = {}
+	local everything = top:GetDescendants()
+	table.insert(everything, top)
+	for _, item in everything do
+		if (item:IsA("JointInstance") or item:IsA("WeldConstraint")) and (item.Part0 == inst or item.Part1 == inst) then
+			table.insert(joints, item)
+		end
+	end
+	return joints
+end
+
 function methods.PivotTo(inst, cf)
 	rawget(inst, "__data").Pivot = cf
 end

@@ -1,5 +1,5 @@
 --!strict
--- Moon VFX Exporter
+-- VFX Exporter
 -- Created by Games.GG
 --
 -- Turns the events in a Moon Animator 2 file (or an Eclipse Animator project) into a table of VFX
@@ -38,7 +38,9 @@ end
 
 local plugin = plugin :: Plugin
 
-local EXPORT_FOLDER = "MoonVFXExports"
+local EXPORT_FOLDER = "VFXExports"
+-- Where exports went before the plugin was renamed: moved to EXPORT_FOLDER on the next export.
+local OLD_EXPORT_FOLDER = "MoonVFXExports"
 local DEFAULT_TOLERANCE = 0.15
 local DEFAULT_TABLE_NAME = "MoonAnimation"
 
@@ -86,9 +88,9 @@ local state = {
 	ExportFps = setting("ExportFps", "Auto") :: string | number,
 }
 
-local toolbar = plugin:CreateToolbar("Moon VFX Exporter")
+local toolbar = plugin:CreateToolbar("VFX Exporter")
 local toolbarButton = toolbar:CreateButton(
-	"MoonVFXExporter",
+	"VFXExporter",
 	"Turn Moon Animator and Eclipse Animator events into VFX cues",
 	"",
 	"VFX Exporter"
@@ -96,11 +98,11 @@ local toolbarButton = toolbar:CreateButton(
 toolbarButton.ClickableWhenViewportHidden = true
 
 local dock = plugin:CreateDockWidgetPluginGui(
-	"MoonVFXExporter",
+	"VFXExporter",
 	DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, false, false, 400, 700, 320, 420)
 )
-dock.Name = "MoonVFXExporter"
-dock.Title = "Moon VFX Exporter"
+dock.Name = "VFXExporter"
+dock.Title = "VFX Exporter"
 
 local ui = Widget.new(dock)
 ui.CueTolerance.Text = tostring(setting("CueTolerance", DEFAULT_TOLERANCE))
@@ -229,9 +231,14 @@ end
 -- Writes the exported module along with what its code requires: the Sequence module (kept if it's
 -- already there, in case it was edited) and a fresh copy of the VFX objects.
 local function writeModule(name: string, source: string, cues: { Exporter.Cue }): (ModuleScript, number, boolean)
-	local recording = ChangeHistoryService:TryBeginRecording("Export Moon VFX cues")
+	local recording = ChangeHistoryService:TryBeginRecording("Export VFX cues")
 
 	local folder = ServerStorage:FindFirstChild(EXPORT_FOLDER)
+	local old = ServerStorage:FindFirstChild(OLD_EXPORT_FOLDER)
+	if not folder and old and old:IsA("Folder") then
+		old.Name = EXPORT_FOLDER
+		folder = old
+	end
 	if not folder then
 		folder = Instance.new("Folder")
 		folder.Name = EXPORT_FOLDER
@@ -333,7 +340,7 @@ local function export(openScript: boolean): (ModuleScript?, any)
 
 	-- Keep the Functions added to the last export of this file.
 	local kept, orphans = 0, {}
-	local exportFolder = ServerStorage:FindFirstChild(EXPORT_FOLDER)
+	local exportFolder = ServerStorage:FindFirstChild(EXPORT_FOLDER) or ServerStorage:FindFirstChild(OLD_EXPORT_FOLDER)
 	local previous = exportFolder and exportFolder:FindFirstChild(entry.Name)
 	if previous and previous:IsA("ModuleScript") then
 		local okSource, oldSource = pcall(function()
@@ -466,9 +473,9 @@ local function export(openScript: boolean): (ModuleScript?, any)
 	end
 	ui:SetStatus(message, if flagged > 0 or objectless > 0 or #orphans > 0 or #warnings > 0 then "warn" else "ok")
 
-	print(`[Moon VFX Exporter] {message}`)
+	print(`[VFX Exporter] {message}`)
 	for _, warning in warnings do
-		warn(`[Moon VFX Exporter] {warning}`)
+		warn(`[VFX Exporter] {warning}`)
 	end
 	if openScript then
 		plugin:OpenScript(module)
@@ -497,11 +504,11 @@ local function saveRbxm()
 		return (plugin :: any)[method](plugin, module.Name)
 	end)
 
-	local fallback = `You can also right-click {module.Name} in ServerStorage.MoonVFXExports and choose Save to File.`
+	local fallback = `You can also right-click {module.Name} in ServerStorage.{EXPORT_FOLDER} and choose Save to File.`
 	if not ok then
 		-- Leave the module selected so Save to File is one right-click away.
 		ui:SetStatus(`Couldn't open the save window: {saved}\n{fallback}`, "error")
-		warn(`[Moon VFX Exporter] {method} failed: {saved}`)
+		warn(`[VFX Exporter] {method} failed: {saved}`)
 	elseif saved then
 		Selection:Set(previous)
 		ui:SetStatus(
@@ -559,7 +566,7 @@ local function preview()
 	-- A copy, so require runs this export rather than an older one it has cached. It's not part of
 	-- the place, and neither is anything the preview spawns, so saving mid-preview saves none of it.
 	local copy = module:Clone()
-	copy.Name = "MoonVFXPreview"
+	copy.Name = "VFXPreview"
 	copy.Archivable = false
 	pcall(function()
 		copy.Parent = CoreGui

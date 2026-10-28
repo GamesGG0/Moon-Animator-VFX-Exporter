@@ -418,7 +418,7 @@ function Formatter.codeFunction(code: string, asset: string?, adapted: any?, mis
 	if missing and #missing > 0 then
 		table.insert(lines, `\t\t\t-- It uses {uses} from your {tool} scene, which the game won't have: adapt that, then uncomment it.`)
 	end
-	local warning = `[Moon VFX] {label or "A cue"} runs event code from {tool} that uses {uses} from the {tool} scene, so it does nothing until it's adapted (see its Function).`
+	local warning = `[VFX Exporter] {label or "A cue"} runs event code from {tool} that uses {uses} from the {tool} scene, so it does nothing until it's adapted (see its Function).`
 	table.insert(lines, `\t\t\twarn({string.format("%q", warning)})`)
 	table.insert(lines, `\t\t\t--[{level}[`)
 	for _, line in commented do

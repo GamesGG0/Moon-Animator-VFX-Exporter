@@ -7,7 +7,9 @@
 local EclipseHook = {}
 EclipseHook.__index = EclipseHook
 
-local ROW_NAME = "MoonVFXExporterRow"
+local ROW_NAME = "VFXExporterRow"
+-- What the row was called before the plugin was renamed.
+local OLD_ROW_NAME = "MoonVFXExporterRow"
 local LABEL = "Export VFX"
 -- Eclipse's own export icon.
 local ICON = "rbxassetid://136636358423324"
@@ -229,7 +231,7 @@ function EclipseHook:Refresh()
 		end
 		-- Rows left over from an earlier session of this plugin no longer do anything.
 		for _, child in content:GetChildren() do
-			if child.Name == ROW_NAME then
+			if child.Name == ROW_NAME or child.Name == OLD_ROW_NAME then
 				child:Destroy()
 			end
 		end

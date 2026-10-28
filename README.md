@@ -1,8 +1,8 @@
-# Moon VFX Exporter
+# VFX Exporter
 
 A Roblox Studio plugin that turns the events in a [Moon Animator 2](https://create.roblox.com/store/asset/4725618216) animation, or an [Eclipse Animator](https://create.roblox.com/store/asset/86116556258301) project, into ready-to-use VFX code. Created by Games.GG.
 
-## [Download on the Creator Store](https://create.roblox.com/store/asset/88386490728445/Moon-VFX-Exporter)
+## [Download on the Creator Store](https://create.roblox.com/store/asset/88386490728445/VFX-Exporter)
 
 Instead of scrubbing to every VFX event and printing `HumanoidRootPart.CFrame:ToObjectSpace(part.CFrame)` by hand, the plugin reads the saved animation and writes the whole cue table for you:
 
@@ -58,7 +58,7 @@ sequence:Play(track, data, Resources.VFX) -- track and data are optional; the VF
 
 1. In Moon Animator, add an event (Edit Events) on each VFX item at the frame it should fire, then save the file (Ctrl+S). The plugin reads the saved copy.
 2. Click **Export VFX** in Moon Animator, or open **VFX Exporter** from the Plugins tab, pick the file and click **Export cues**.
-3. The module appears in `ServerStorage.MoonVFXExports` and opens in the script editor, with its `Sequence` module and a `VFX` folder of the objects it uses. Move the module and `Sequence` to ReplicatedStorage, put the VFX where you keep yours (say `Resources.VFX`), and on the client:
+3. The module appears in `ServerStorage.VFXExports` and opens in the script editor, with its `Sequence` module and a `VFX` folder of the objects it uses. Move the module and `Sequence` to ReplicatedStorage, put the VFX where you keep yours (say `Resources.VFX`), and on the client:
 
 ```lua
 local Sequence = require(ReplicatedStorage.Sequence)
@@ -142,7 +142,10 @@ Under the settings are **Export cues**, **Preview**, **Save .rbxm** and **Dump s
 A cue gets a `Parent` automatically when its VFX object is:
 
 - on a part Moon animates through a joint (a limb or an animated weapon): that part, or
-- an attachment on a limb, or a part welded to one: that limb.
+- an attachment on a limb, a part welded to one, or a part put inside one (in the Explorer, with no weld): that limb, or
+- a part or model outside the rig welded to a limb (directly, or through other parts welded to it), or an emitter inside one: that limb. Anchored parts stay put.
+
+In game the Sequence welds the VFX to that part of the character, so it follows it.
 
 To choose one yourself, open the event in Moon's **Edit Events** window, go to the **Events** tab, and add a key `Parent` whose value is a part or attachment name, such as `Right Arm` or `RightGripAttachment`. That wins over the automatic choice. `HumanoidRootPart` works too: the effect then follows the character as it moves (run beams, say), where without a `Parent` it stays where it was placed.
 
@@ -220,10 +223,10 @@ A `Function` holding an event's code from Moon starts with a comment saying so, 
 Requires [Rojo](https://rojo.space) 7.
 
 ```bash
-rojo build --plugin MoonVFXExporter.rbxmx
+rojo build --plugin VFXExporter.rbxmx
 ```
 
-This installs the plugin straight into your Studio plugins folder. Use `rojo build -o build/MoonVFXExporter.rbxmx` to build a file instead.
+This installs the plugin straight into your Studio plugins folder. Use `rojo build -o build/VFXExporter.rbxmx` to build a file instead.
 
 | Module | Job |
 | --- | --- |

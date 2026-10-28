@@ -138,6 +138,8 @@ type Context = {
 	Poses: { [Instance]: any },
 	-- The main character's rig: the first rig in the animation.
 	MainPose: any,
+	-- Parts out of a rig that move with it (welded to it), and models holding them: their rig's pose.
+	Linked: { [Instance]: any },
 	-- Parts Moon's camera is attached to (its AttachToPart keys). VFX on them follow the camera.
 	CameraParts: { [Instance]: boolean },
 }
@@ -182,11 +184,11 @@ local function sampleTrack(ctx: Context, inst: Instance, prop: string, frame: nu
 	return nil
 end
 
--- The pose of the animated rig `inst` is part of (or is), if any.
+-- The pose of the animated rig `inst` is part of (or is, or is welded to), if any.
 local function poseOf(ctx: Context, inst: Instance?): any
 	local node = inst
 	while node and node ~= game do
-		local pose = ctx.Poses[node]
+		local pose = ctx.Poses[node] or ctx.Linked[node]
 		if pose then
 			return pose
 		end
@@ -249,8 +251,8 @@ local function cframeAt(ctx: Context, inst: Instance, frame: number): (CFrame?, 
 			return keyed, nil
 		end
 
-		local pose = poseOf(ctx, inst.Parent)
 		local anchor = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true)
+		local pose = poseOf(ctx, anchor or inst.Parent)
 		if pose and anchor then
 			return pose:CFrameAt(anchor, frame) * anchor.CFrame:ToObjectSpace(inst:GetPivot()), nil
 		end
@@ -1264,7 +1266,19 @@ local function parentFor(ctx: Context, marker: SaveReader.Marker, object: Instan
 		end
 	end
 
-	local attached = pose:AttachedTo(object)
+	-- An emitter or light in a part (or attachment) out of the rig hangs off what that part does.
+	local anchor: Instance = object
+	local holder = object.Parent
+	if not (object:IsA("BasePart") or object:IsA("Model") or object:IsA("Attachment")) and holder and (holder:IsA("BasePart") or holder:IsA("Attachment")) and not holder:IsDescendantOf(pose.Rig) then
+		anchor = holder
+	end
+	local attached = pose:AttachedTo(anchor)
+	-- Through parts out of the rig to the rig part they're welded to.
+	local hops = 0
+	while attached and pose.Linked[attached] and hops < 50 do
+		attached = pose:AttachedTo(attached)
+		hops += 1
+	end
 	if attached and attached ~= pose.Root and attached ~= object then
 		return attached, nil
 	end
@@ -2410,6 +2424,7 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 		Options = options,
 		ByInstance = {},
 		Poses = {},
+		Linked = {},
 		CameraParts = {},
 	}
 
@@ -2431,6 +2446,24 @@ function Exporter.collect(anim: SaveReader.Animation, options: Options): Result
 				local pose = RigPose.new(inst, root, item.Tracks.CFrame, item.Joints, options.MoonEasing)
 				ctx.Poses[inst] = pose
 				ctx.MainPose = ctx.MainPose or pose
+				-- What's welded to it from outside goes with it, and so does a model all of whose
+				-- parts are (a VFX model welded to a hand).
+				local function allLinked(model: Instance): boolean
+					for _, desc in model:GetDescendants() do
+						if desc:IsA("BasePart") and not pose.Linked[desc] then
+							return false
+						end
+					end
+					return true
+				end
+				for part in pose.Linked do
+					ctx.Linked[part] = pose
+					local node = part.Parent
+					while node and node:IsA("Model") and node ~= workspace and not ctx.Poses[node] and allLinked(node) do
+						ctx.Linked[node] = ctx.Linked[node] or pose
+						node = node.Parent
+					end
+				end
 			end
 		end
 	end
