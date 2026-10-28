@@ -8,7 +8,9 @@
 local MoonHook = {}
 MoonHook.__index = MoonHook
 
-local BUTTON_NAME = "MoonVFXExporterButton"
+local BUTTON_NAME = "VFXExporterButton"
+-- What the button was called before the plugin was renamed.
+local OLD_BUTTON_NAME = "MoonVFXExporterButton"
 local LABEL = "Export VFX"
 local GAP = 4
 
@@ -649,7 +651,7 @@ function MoonHook:Report(ui: GuiObject, fellBackTo: string)
 	end
 
 	print(
-		`[Moon VFX Exporter] Couldn't find Moon's Options button, so Export VFX went {fellBackTo}. `
+		`[VFX Exporter] Couldn't find Moon's Options button, so Export VFX went {fellBackTo}. `
 			.. `Moon's top bar: {table.concat(found, ", ")}`
 	)
 end
@@ -689,10 +691,12 @@ function MoonHook:Refresh()
 
 	-- Copies left over from an earlier session of this plugin.
 	if not self.Button then
-		local stale = scope:FindFirstChild(BUTTON_NAME, true)
-		while stale do
-			stale:Destroy()
-			stale = scope:FindFirstChild(BUTTON_NAME, true)
+		for _, name in { BUTTON_NAME, OLD_BUTTON_NAME } do
+			local stale = scope:FindFirstChild(name, true)
+			while stale do
+				stale:Destroy()
+				stale = scope:FindFirstChild(name, true)
+			end
 		end
 	end
 

@@ -261,7 +261,8 @@ function Carryover.extractCues(src: string): { Found }
 	return found
 end
 
--- Cue Functions are called with the sequence first: function(self, effect, character, cue, data).
+-- Cue Functions are called with the sequence first: function(self, effect, character, cue, data,
+-- includeScreenEffects).
 -- One written before that, as function(effect, ...), gets the self it's now given.
 function Carryover.upgrade(text: string): string
 	return (string.gsub(text, "^(function%s*%()(%s*effect%f[^%w_])", "%1self, %2", 1))

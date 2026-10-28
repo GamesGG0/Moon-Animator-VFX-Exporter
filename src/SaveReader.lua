@@ -23,14 +23,25 @@ export type Marker = {
 	Code: { string },
 	-- Key/value pairs from the event's "Events" tab, e.g. Parent = "Right Arm".
 	Keys: { [string]: string },
+	-- Eclipse Animator's events (see EclipseReader) also have: the Parameter its code gets, code to
+	-- run once the event's Width (its duration) is over, what it emits (Exact: the instance alone,
+	-- Selected: with the effects right inside it, All: with every effect in it), and the effects it
+	-- switches on or off.
+	Parameter: string?,
+	EndCode: string?,
+	Emits: { { Instance: Instance, Mode: string, Count: number? } }?,
+	Switches: { { Instance: Instance, Mode: string, Enabled: boolean } }?,
 }
 
 -- A rig joint's keyframes. Hier is the chain of parts from the root, e.g. "Torso.Right Arm";
--- the keyed values are the joint's C1.
+-- the keyed values are the joint's C1. Eclipse's joints name their Motor6D instead, and key its C0
+-- (Keyed = "C0"), with Default the C0 it rests at.
 export type Joint = {
 	Hier: { string },
 	Default: CFrame?,
 	Track: { Keyframe },
+	Motor: Motor6D?,
+	Keyed: string?,
 }
 
 export type Item = {
@@ -45,6 +56,16 @@ export type Item = {
 	Markers: { Marker },
 	Joints: { Joint },
 	PathTypes: { string },
+	-- An Eclipse item's id (its EclipseTrackId), which picks a camera shake's pattern.
+	TrackId: string?,
+}
+
+-- One of Eclipse Animator's subtitles (see EclipseReader): the frame it shows from, and the cue as
+-- Eclipse keeps it, in frames: { Duration, InFrames, OutFrames, Entrance, Exit, Order, Base (its
+-- style), Keys = { { Frame, Value (a style), Ease } } }, every style field filled in.
+export type Subtitle = {
+	Frame: number,
+	Cue: { [string]: any },
 }
 
 export type SaveEntry = {
@@ -53,10 +74,16 @@ export type SaveEntry = {
 	Length: number,
 	FPS: number,
 	Modified: number?,
+	-- "Eclipse" for an Eclipse Animator project (see EclipseReader); Moon's files leave it out.
+	Source: string?,
 }
 
 export type Animation = SaveEntry & {
 	Items: { Item },
+	-- What the reader couldn't read as it is, to pass on with the export's other warnings.
+	Warnings: { string }?,
+	-- An Eclipse project's subtitles, by when they show.
+	Subtitles: { Subtitle }?,
 }
 
 local SAVE_FOLDER = "MoonAnimator2Saves"

@@ -1,8 +1,9 @@
 --!strict
--- Moon VFX Exporter
+-- VFX Exporter
 -- Created by Games.GG
 --
--- Turns the events in a Moon Animator 2 file into a table of VFX cues:
+-- Turns the events in a Moon Animator 2 file (or an Eclipse Animator project) into a table of VFX
+-- cues:
 --   [frame] = { Effect = "Name", Offset = <effect CFrame relative to the HumanoidRootPart> }
 -- exported as a ModuleScript that can play them, with a Sequence module and the VFX objects inside.
 
@@ -13,6 +14,8 @@ local ServerStorage = game:GetService("ServerStorage")
 local CoreGui = game:GetService("CoreGui")
 
 local Carryover = require(script.Carryover)
+local EclipseHook = require(script.EclipseHook)
+local EclipseReader = require(script.EclipseReader)
 local Exporter = require(script.Exporter)
 local Formatter = require(script.Formatter)
 local MoonHook = require(script.MoonHook)
@@ -22,9 +25,11 @@ local Widget = require(script.Widget)
 
 local SEQUENCE_TEMPLATE = script.Templates.Sequence
 -- The Sequence version exports are written for: Sequence.new(animation, character), with
--- :Play(track, data, vfx) playing the cues' Keys, Screen and Target fields itself, and calling
--- Functions as Function(sequence, effect, character, cue, data).
-local SEQUENCE_VERSION = 8
+-- :Play(track, data, vfx, options) playing the cues' Keys (Bezier ones too), Screen (and its ScaleText),
+-- Subtitle, Target (Shake too), Lifetime and EmitCount fields itself, emitting with the emitter the
+-- table or a cue names, calling Functions as Function(sequence, effect, character, cue, data, includeScreenEffects), and
+-- cleaning up threads a Function hands it.
+local SEQUENCE_VERSION = 13
 
 -- A Sequence module's version, from its `module.Version = n` line (versions before 2 had none).
 local function sequenceVersion(source: string): number
@@ -33,7 +38,9 @@ end
 
 local plugin = plugin :: Plugin
 
-local EXPORT_FOLDER = "MoonVFXExports"
+local EXPORT_FOLDER = "VFXExports"
+-- Where exports went before the plugin was renamed: moved to EXPORT_FOLDER on the next export.
+local OLD_EXPORT_FOLDER = "MoonVFXExports"
 local DEFAULT_TOLERANCE = 0.15
 local DEFAULT_TABLE_NAME = "MoonAnimation"
 
@@ -81,21 +88,21 @@ local state = {
 	ExportFps = setting("ExportFps", "Auto") :: string | number,
 }
 
-local toolbar = plugin:CreateToolbar("Moon VFX Exporter")
+local toolbar = plugin:CreateToolbar("VFX Exporter")
 local toolbarButton = toolbar:CreateButton(
-	"MoonVFXExporter",
-	"Turn Moon Animator events into VFX offset cues",
+	"VFXExporter",
+	"Turn Moon Animator and Eclipse Animator events into VFX cues",
 	"",
 	"VFX Exporter"
 )
 toolbarButton.ClickableWhenViewportHidden = true
 
 local dock = plugin:CreateDockWidgetPluginGui(
-	"MoonVFXExporter",
+	"VFXExporter",
 	DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, false, false, 400, 700, 320, 420)
 )
-dock.Name = "MoonVFXExporter"
-dock.Title = "Moon VFX Exporter"
+dock.Name = "VFXExporter"
+dock.Title = "VFX Exporter"
 
 local ui = Widget.new(dock)
 ui.CueTolerance.Text = tostring(setting("CueTolerance", DEFAULT_TOLERANCE))
@@ -144,9 +151,23 @@ local function selectSave(entry: SaveReader.SaveEntry?)
 	end
 end
 
+-- The reader for a file: Moon's, or Eclipse's for an Eclipse project.
+local function readerFor(entry: SaveReader.SaveEntry): any
+	return if entry.Source == "Eclipse" then EclipseReader else SaveReader
+end
+
 local function refreshSaves()
-	local ok, saves = pcall(SaveReader.findSaves)
-	state.Saves = if ok then saves else {}
+	-- Moon's files (most recent first), then Eclipse's projects.
+	local saves = {}
+	for _, reader in { SaveReader, EclipseReader } do
+		local ok, found = pcall(reader.findSaves)
+		if ok then
+			for _, entry in found do
+				table.insert(saves, entry)
+			end
+		end
+	end
+	state.Saves = saves
 
 	local keep = nil
 	if state.Selected then
@@ -160,13 +181,49 @@ local function refreshSaves()
 	selectSave(keep)
 end
 
-local function selectOpenSave(): SaveReader.SaveEntry?
-	local entry, how = MoonHook.detectOpenSave(state.Saves)
+-- The saved Eclipse project of this name, if there is one.
+local function eclipseProject(name: string?): SaveReader.SaveEntry?
+	for _, entry in state.Saves do
+		if entry.Source == "Eclipse" and entry.Name == name then
+			return entry
+		end
+	end
+	return nil
+end
+
+-- Selects the file open in Moon, else the project open in Eclipse, else Moon's newest file, else the
+-- first Eclipse project. From Moon's own button (`moonOnly`), only Moon's files.
+local function selectOpenSave(moonOnly: boolean?): SaveReader.SaveEntry?
+	local moonSaves = {}
+	for _, saved in state.Saves do
+		if saved.Source == nil then
+			table.insert(moonSaves, saved)
+		end
+	end
+	local entry, how = nil, ""
+	if MoonHook.isRunning() then
+		entry, how = MoonHook.detectOpenSave(moonSaves)
+	end
+	if how ~= "open in Moon Animator" and not moonOnly then
+		local open = eclipseProject(EclipseHook.openProjectName())
+		if open then
+			entry, how = open, "open in Eclipse Animator"
+		end
+	end
+	if not entry and #moonSaves > 0 then
+		entry, how = MoonHook.detectOpenSave(moonSaves)
+	end
+	if not entry and #state.Saves > 0 and not moonOnly then
+		entry = state.Saves[1]
+		how = if #state.Saves == 1 then "the Eclipse Animator project in this place" else `the first of {#state.Saves} Eclipse Animator projects`
+	end
 	selectSave(entry)
 	if entry then
 		ui:SetStatus(`Selected "{entry.Name}" ({how}).`, "info")
+	elseif moonOnly then
+		ui:SetStatus("No Moon Animator 2 saves found. Save your animation in Moon first (Ctrl+S).", "warn")
 	else
-		ui:SetStatus("No Moon Animator 2 saves found. Save your animation in Moon first.", "warn")
+		ui:SetStatus("No Moon Animator 2 saves or Eclipse Animator projects found. Save your animation in Moon or Eclipse first.", "warn")
 	end
 	return entry
 end
@@ -174,9 +231,14 @@ end
 -- Writes the exported module along with what its code requires: the Sequence module (kept if it's
 -- already there, in case it was edited) and a fresh copy of the VFX objects.
 local function writeModule(name: string, source: string, cues: { Exporter.Cue }): (ModuleScript, number, boolean)
-	local recording = ChangeHistoryService:TryBeginRecording("Export Moon VFX cues")
+	local recording = ChangeHistoryService:TryBeginRecording("Export VFX cues")
 
 	local folder = ServerStorage:FindFirstChild(EXPORT_FOLDER)
+	local old = ServerStorage:FindFirstChild(OLD_EXPORT_FOLDER)
+	if not folder and old and old:IsA("Folder") then
+		old.Name = EXPORT_FOLDER
+		folder = old
+	end
 	if not folder then
 		folder = Instance.new("Folder")
 		folder.Name = EXPORT_FOLDER
@@ -238,7 +300,9 @@ local function export(openScript: boolean): (ModuleScript?, any)
 		return nil
 	end
 
-	local loaded, anim = pcall(SaveReader.load, entry.Save)
+	local eclipse = entry.Source == "Eclipse"
+	local tool = if eclipse then "Eclipse" else "Moon"
+	local loaded, anim = pcall(readerFor(entry).load, entry.Save)
 	if not loaded then
 		ui:SetStatus(`Couldn't read "{entry.Name}": {anim}`, "error")
 		return nil
@@ -248,17 +312,20 @@ local function export(openScript: boolean): (ModuleScript?, any)
 		EffectName = state.EffectName,
 		Origin = if state.Origin and state.Origin.Parent then state.Origin else nil,
 		Target = if state.Target and state.Target.Parent then state.Target else nil,
-		MoonEasing = MoonHook.getEasingFunctions(),
+		-- Moon's own easing functions, for Moon's keys; Eclipse's eases are worked out from the save.
+		MoonEasing = if eclipse then nil else MoonHook.getEasingFunctions(),
 		FrameRate = if type(state.ExportFps) == "number" then state.ExportFps else nil,
 	})
 
 	if #result.Cues == 0 then
 		ui:SetPreview("")
-		ui:SetStatus(
-			`No events found in "{entry.Name}". If you just added them, save in Moon (Ctrl+S) and export again. `
-				.. "If they still don't show up, click Dump save and check the outline.",
-			"warn"
-		)
+		local saveHint = if eclipse then "save the project in Eclipse" else "save in Moon (Ctrl+S)"
+		local message = `No events found in "{entry.Name}". If you just added them, {saveHint} and export again. `
+			.. "If they still don't show up, click Dump save and check the outline."
+		if #result.Warnings > 0 then
+			message ..= "\n" .. table.concat(result.Warnings, "\n")
+		end
+		ui:SetStatus(message, "warn")
 		return nil
 	end
 
@@ -273,7 +340,7 @@ local function export(openScript: boolean): (ModuleScript?, any)
 
 	-- Keep the Functions added to the last export of this file.
 	local kept, orphans = 0, {}
-	local exportFolder = ServerStorage:FindFirstChild(EXPORT_FOLDER)
+	local exportFolder = ServerStorage:FindFirstChild(EXPORT_FOLDER) or ServerStorage:FindFirstChild(OLD_EXPORT_FOLDER)
 	local previous = exportFolder and exportFolder:FindFirstChild(entry.Name)
 	if previous and previous:IsA("ModuleScript") then
 		local okSource, oldSource = pcall(function()
@@ -300,23 +367,29 @@ local function export(openScript: boolean): (ModuleScript?, any)
 		TableName = tableName,
 		Lifetime = lifetime,
 		CueTolerance = tolerance,
-		Header = `Moon Animator file "{entry.Name}" ({anim.FPS} fps). Cue keys are {keyKind}.`,
+		Header = `{if eclipse then "Eclipse Animator project" else "Moon Animator file"} "{entry.Name}" ({anim.FPS} fps). Cue keys are {keyKind}.`,
 		Timestamps = timestamps,
 		FPS = rate,
 		Runtime = true,
 		Cues = result.Cues,
 		Orphans = orphans,
+		Source = if eclipse then "Eclipse" else nil,
 	})
 
 	local module, packed, updatedSequence = writeModule(entry.Name, source, result.Cues)
 	ui:SetPreview(source)
 
-	local flagged, objectless, screens, keyframed, adapted, rigNames = 0, 0, 0, 0, 0, {}
+	local flagged, objectless, screens, keyframed, adapted, rigNames, emitters = 0, 0, 0, 0, 0, {}, {}
+	local subtitles, shakes = 0, 0
 	for _, cue in result.Cues do
 		if #cue.Notes > 0 then
 			flagged += 1
 		end
-		if cue.Screen then
+		if cue.Subtitle then
+			subtitles += 1
+		elseif cue.Animation and cue.Animation.Kind == "Shake" then
+			shakes += 1
+		elseif cue.Screen then
 			screens += 1
 		elseif cue.Animation then
 			keyframed += 1
@@ -330,9 +403,16 @@ local function export(openScript: boolean): (ModuleScript?, any)
 		if cue.Rig and not table.find(rigNames, cue.Rig) then
 			table.insert(rigNames, cue.Rig)
 		end
+		local emitter = cue.Emitter
+		if type(emitter) == "table" and not table.find(emitters, emitter.Module) then
+			table.insert(emitters, emitter.Module)
+		end
 	end
 
-	local message = `Exported {#result.Cues} cues and {packed} VFX objects to {module:GetFullName()}.`
+	local message = `Exported {#result.Cues} cues and {packed} VFX objects to {module:GetFullName()}{if eclipse then ", from the project as Eclipse last saved it" else ""}.`
+	if #emitters > 0 then
+		message ..= ` The events emitted with {table.concat(emitters, ", ")}, so the Sequence emits their VFX with {if #emitters == 1 then "it" else "them"} (required once, not cloned), and those cues need no Function for it.`
+	end
 	if kept > 0 then
 		message ..= ` Kept {kept} cue Function{if kept == 1 then "" else "s"} from the last export.`
 	end
@@ -348,11 +428,17 @@ local function export(openScript: boolean): (ModuleScript?, any)
 	if screens > 0 then
 		message ..= ` {screens} of them {if screens == 1 then "is a screen effect" else "are screen effects"}, which the Sequence module plays.`
 	end
+	if subtitles > 0 then
+		message ..= ` {subtitles} {if subtitles == 1 then "is a subtitle" else "are subtitles"}, which the Sequence draws as Eclipse does.`
+	end
+	if shakes > 0 then
+		message ..= ` {shakes} {if shakes == 1 then "is a camera shake" else "are camera shakes"}, which the Sequence plays as Eclipse does.`
+	end
 	if keyframed > 0 then
-		message ..= ` {keyframed} {if keyframed == 1 then "is an effect" else "are effects"} Moon animates with keyframes (Highlights, lights, Lighting, the camera's field of view, moving parts); the Sequence module replays their keys.`
+		message ..= ` {keyframed} {if keyframed == 1 then "is an effect" else "are effects"} {tool} animates with keyframes (Highlights, lights, Lighting, the camera's field of view, moving parts); the Sequence module replays their keys.`
 	end
 	if adapted > 0 then
-		message ..= ` {adapted} {if adapted == 1 then "event's" else "events'"} code from Moon was rewritten to run in game, in the cue's Function.`
+		message ..= ` {adapted} {if adapted == 1 then "event's" else "events'"} code from {tool} was rewritten to run in game, in the cue's Function.`
 	end
 	if #rigNames > 0 then
 		table.sort(rigNames)
@@ -387,9 +473,9 @@ local function export(openScript: boolean): (ModuleScript?, any)
 	end
 	ui:SetStatus(message, if flagged > 0 or objectless > 0 or #orphans > 0 or #warnings > 0 then "warn" else "ok")
 
-	print(`[Moon VFX Exporter] {message}`)
+	print(`[VFX Exporter] {message}`)
 	for _, warning in warnings do
-		warn(`[Moon VFX Exporter] {warning}`)
+		warn(`[VFX Exporter] {warning}`)
 	end
 	if openScript then
 		plugin:OpenScript(module)
@@ -418,11 +504,11 @@ local function saveRbxm()
 		return (plugin :: any)[method](plugin, module.Name)
 	end)
 
-	local fallback = `You can also right-click {module.Name} in ServerStorage.MoonVFXExports and choose Save to File.`
+	local fallback = `You can also right-click {module.Name} in ServerStorage.{EXPORT_FOLDER} and choose Save to File.`
 	if not ok then
 		-- Leave the module selected so Save to File is one right-click away.
 		ui:SetStatus(`Couldn't open the save window: {saved}\n{fallback}`, "error")
-		warn(`[Moon VFX Exporter] {method} failed: {saved}`)
+		warn(`[VFX Exporter] {method} failed: {saved}`)
 	elseif saved then
 		Selection:Set(previous)
 		ui:SetStatus(
@@ -480,7 +566,7 @@ local function preview()
 	-- A copy, so require runs this export rather than an older one it has cached. It's not part of
 	-- the place, and neither is anything the preview spawns, so saving mid-preview saves none of it.
 	local copy = module:Clone()
-	copy.Name = "MoonVFXPreview"
+	copy.Name = "VFXPreview"
 	copy.Archivable = false
 	pcall(function()
 		copy.Parent = CoreGui
@@ -536,7 +622,7 @@ local function preview()
 	end
 	ui:SetStatus(
 		`Previewing on {character.Name}{if #otherNames > 0 then ` (with {table.concat(otherNames, ", ")} for its Rig cues)` else ""}. `
-			.. "The VFX play by the clock from now, from where the rig stands; Moon's animation doesn't play along. "
+			.. `The VFX play by the clock from now, from where the rig stands; {if anim.Source == "Eclipse" then "Eclipse" else "Moon"}'s animation doesn't play along. `
 			.. "Click Stop preview to end it. The export's details are in the Output.",
 		"info"
 	)
@@ -549,7 +635,7 @@ local function dump()
 		return
 	end
 
-	local outline = SaveReader.dump(entry.Save)
+	local outline = readerFor(entry).dump(entry.Save)
 	print(outline)
 	ui:SetPreview(outline)
 	ui:SetStatus("Save outline printed to the Output window.", "info")
@@ -563,11 +649,29 @@ end
 local hook = MoonHook.new(function()
 	dock.Enabled = true
 	refreshSaves()
-	if selectOpenSave() then
+	if selectOpenSave(true) then
 		export(true)
 	end
 end)
 hook:SetPlacement(state.Placement :: any)
+
+-- Eclipse's Item › Export VFX: exports the project open in Eclipse, as it was last saved.
+local eclipseHook = EclipseHook.new(function(projectName)
+	dock.Enabled = true
+	refreshSaves()
+	local entry = eclipseProject(projectName)
+	if not entry then
+		ui:SetStatus(
+			if projectName
+				then `"{projectName}" isn't saved as an Eclipse Animator project in this place yet. Save it in Eclipse, then export again.`
+				else "Open (or save) a project in Eclipse Animator first, then export again.",
+			"warn"
+		)
+		return
+	end
+	selectSave(entry)
+	export(true)
+end)
 
 ui.OnSaveSelected = function(entry)
 	selectSave(entry)
@@ -576,7 +680,13 @@ end
 
 ui.Buttons.Refresh.MouseButton1Click:Connect(function()
 	refreshSaves()
-	ui:SetStatus(`Found {#state.Saves} Moon Animator save(s).`, "info")
+	local eclipse = 0
+	for _, entry in state.Saves do
+		if entry.Source == "Eclipse" then
+			eclipse += 1
+		end
+	end
+	ui:SetStatus(`Found {#state.Saves - eclipse} Moon Animator save(s) and {eclipse} Eclipse Animator project(s).`, "info")
 end)
 
 ui.Buttons.Detect.MouseButton1Click:Connect(function()
@@ -675,6 +785,7 @@ end)
 plugin.Unloading:Connect(function()
 	stopPreview()
 	hook:Destroy()
+	eclipseHook:Destroy()
 	ui:Destroy()
 end)
 

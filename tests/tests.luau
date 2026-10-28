@@ -170,7 +170,12 @@ local save = value("StringValue", "Ripper Test", mockJson({
 do -- 1: the rig, with an event whose code names the Shine part
 	local item = folder("1", save)
 	folder("Rig", item)
-	marker(folder("MarkerTrack", item), 5, "Spawn", 'shared.vfx.emit(workspace["Ripper Test"].Shine)')
+	local markers = folder("MarkerTrack", item)
+	marker(markers, 5, "Spawn", 'shared.vfx.emit(workspace["Ripper Test"].Shine)')
+	-- A marker for the game (Damage = 3 in Moon's Events tab), with no name or code.
+	marker(markers, 60, "")
+	local key = value("StringValue", "1", "Damage", markers:FindFirstChild("60"):FindFirstChild("KFMarkers"))
+	value("StringValue", "Val", "3", key)
 end
 
 do -- 2: ImpactAnti, linear move from cfA (frame 0) to cfB (frame 20)
@@ -258,6 +263,7 @@ end
 
 check("cue frames", table.concat(frames, ",") == "5,10,11,30,41,50", table.concat(frames, ","))
 check("event count", result.EventCount == 6)
+check("a rig event with only Events-tab keys (a game marker) is left out", byFrame[60] == nil and result.Skipped["Ripper Test"] == 1, result.Skipped["Ripper Test"])
 check("warns about missing items", #result.Warnings == 1, result.Warnings[1])
 
 local function expectOffset(frame: number, effect: string, world: any)
@@ -283,6 +289,7 @@ check("item naming ignores event names", itemNames.Cues[4].Effect == "ImpactAnti
 local overridden = Exporter.collect(anim, { EffectName = "Event", Target = shine, FrameRate = 60 })
 check("target override measures every cue at it", cfNear(overridden.Cues[2].Offset, hrpCFrame:ToObjectSpace(shine.CFrame)))
 check("target override keeps item names", overridden.Cues[2].Effect == "ImpactAnti", overridden.Cues[2].Effect)
+check("measured at a chosen part, a rig event without a name still plays", overridden.Cues[#overridden.Cues].Frame == 60)
 
 local origin = Instance.new("Part", { Name = "Origin", CFrame = CFrame.new(0, 10, 0), Parent = game:GetService("Workspace") })
 local custom = Exporter.collect(anim, { EffectName = "Event", Origin = origin, FrameRate = 60 })
@@ -567,6 +574,81 @@ do
 
 	rig.Parent = nil
 	save.Parent = nil
+end
+
+-- VFX that follow a body part: put inside it, or welded to it from outside the rig ----------------
+
+do
+	local workspace = game:GetService("Workspace")
+	local rig = Instance.new("Model", { Name = "Puncher", Parent = workspace })
+	local rootCF = CFrame.new(0, 3, 0)
+	local root = Instance.new("Part", { Name = "HumanoidRootPart", CFrame = rootCF, Parent = rig })
+	rig.PrimaryPart = root
+	Instance.new("Humanoid", { Name = "Humanoid", Parent = rig })
+	local restC1 = CFrame.new(-1.5, 0, 0)
+	local arm = Instance.new("Part", { Name = "Right Arm", CFrame = rootCF * restC1:Inverse(), Parent = rig })
+	Instance.new("Motor6D", { Name = "Right Shoulder", Part0 = root, Part1 = arm, C0 = CFrame.new(), C1 = restC1, Parent = root })
+	local raised = restC1 * CFrame.Angles(math.pi / 2, 0, 0)
+	local raisedArm = rootCF * raised:Inverse()
+
+	-- Put inside the arm, with no weld.
+	local fist = Instance.new("Part", { Name = "Fist", CFrame = arm.CFrame * CFrame.new(0, -1, 0), Parent = arm })
+	-- Out of the rig, welded to the arm; a model welded to that; an emitter in it.
+	local blade = Instance.new("Part", { Name = "Blade", Anchored = false, CFrame = arm.CFrame * CFrame.new(0, -2, -1), Parent = workspace })
+	Instance.new("WeldConstraint", { Part0 = blade, Part1 = arm, Parent = blade })
+	local glow = Instance.new("Model", { Name = "Glow", Parent = workspace })
+	local ring = Instance.new("Part", { Name = "Ring", Anchored = false, CFrame = blade.CFrame * CFrame.new(0, 0, -1), Parent = glow })
+	glow.PrimaryPart = ring
+	Instance.new("WeldConstraint", { Part0 = ring, Part1 = blade, Parent = ring })
+	local spark = Instance.new("ParticleEmitter", { Name = "Spark", Parent = blade })
+	-- Anchored, it stays put even though it's welded to the arm.
+	local post = Instance.new("Part", { Name = "Post", Anchored = true, CFrame = CFrame.new(0, 0, 9), Parent = workspace })
+	Instance.new("WeldConstraint", { Part0 = post, Part1 = arm, Parent = post })
+
+	local pose = RigPose.new(rig, root, nil, { { Hier = { "Right Arm" }, Track = { { Time = 0, Value = restC1 }, { Time = 10, Value = raised } } } })
+	check("a part put inside a body part hangs off it", pose:AttachedTo(fist) == arm and cfNear(pose:CFrameAt(fist, 10), raisedArm * CFrame.new(0, -1, 0)))
+	check("a part welded to a body part from outside the rig moves with it", pose.Linked[blade] and pose:AttachedTo(blade) == arm and cfNear(pose:CFrameAt(blade, 10), raisedArm * CFrame.new(0, -2, -1)))
+	check("and so does one welded to that", pose.Linked[ring] and pose:AttachedTo(ring) == arm and cfNear(pose:CFrameAt(ring, 10), raisedArm * CFrame.new(0, -2, -2)))
+	check("an anchored part welded to it doesn't", not pose.Linked[post])
+
+	-- Through a Moon save: each one's cue follows the arm, measured from it.
+	local save = value("StringValue", "Punches", mockJson({
+		Information = { Length = 60, FPS = 60, Modified = 1 },
+		Items = {
+			{ Path = { InstanceNames = { "game", "Workspace", "Puncher" }, InstanceTypes = { "DataModel", "Workspace", "Model" }, ItemType = "Rig" } },
+			{ Path = { InstanceNames = { "game", "Workspace", "Puncher", "Right Arm", "Fist" }, InstanceTypes = { "DataModel", "Workspace", "Model", "Part", "Part" }, ItemType = "BasePart" } },
+			{ Path = { InstanceNames = { "game", "Workspace", "Blade" }, InstanceTypes = { "DataModel", "Workspace", "Part" }, ItemType = "BasePart" } },
+			{ Path = { InstanceNames = { "game", "Workspace", "Glow" }, InstanceTypes = { "DataModel", "Workspace", "Model" }, ItemType = "Model" } },
+		},
+	}), saves)
+	local jointFolder = folder("_joint", folder("Rig", folder("1", save)))
+	value("StringValue", "_hier", "Right Arm", jointFolder)
+	value("CFrameValue", "default", restC1, jointFolder)
+	local keyframes = folder("_keyframes", jointFolder)
+	keyframe(keyframes, 0, { restC1 })
+	keyframe(keyframes, 10, { raised })
+	marker(folder("MarkerTrack", save:FindFirstChild("1")), 12, "", "shared.vfx.emit(workspace.Blade.Spark)")
+	marker(folder("MarkerTrack", folder("2", save)), 10, "Punch")
+	marker(folder("MarkerTrack", folder("3", save)), 10, "Slash")
+	marker(folder("MarkerTrack", folder("4", save)), 11, "Shine")
+
+	local byEffect = {}
+	for _, cue in Exporter.collect(SaveReader.load(save), { EffectName = "Event", FrameRate = 60 }).Cues do
+		byEffect[cue.Effect] = cue
+	end
+	local function follows(name: string, offset: CFrame)
+		local cue = byEffect[name]
+		check(`{name} follows the arm, measured from it`, cue and cue.Parent == "Right Arm" and cfNear(cue.Offset, offset), cue and `{cue.Parent} {cue.Offset}`)
+	end
+	follows("Punch", CFrame.new(0, -1, 0))
+	follows("Slash", CFrame.new(0, -2, -1))
+	follows("Shine", CFrame.new(0, -2, -2))
+	follows("Spark", CFrame.new(0, -2, -1))
+	check("an emitter in the welded part spawns in it", byEffect.Spark and byEffect.Spark.Object == blade and byEffect.Spark.Only and byEffect.Spark.Only[1] == spark)
+
+	for _, inst in { rig, blade, glow, post, save } do
+		inst.Parent = nil
+	end
 end
 
 -- Two rigs, loose parts and nested attachments (shaped like the AeroFinisher save) -------------
@@ -975,7 +1057,11 @@ do
 
 	-- Events on Moon's Subtitles count for what they emit; code that does something else is kept.
 	check("an emit on Moon's Subtitles is a cue", byFrame[150] and byFrame[150].Object == p1, byFrame[150] and byFrame[150].Effect)
-	check("so is Part_Icles' AbsoluteEmit through a local", byFrame[160] and byFrame[160].Object == lamp and byFrame[160].Code == nil)
+	check("so is Part_Icles' AbsoluteEmit through a local", byFrame[160] and byFrame[160].Object == lamp)
+	check(
+		"code that does more with its emitter (Part_Icles:Activate) keeps it all, and emits by itself",
+		byFrame[160] and byFrame[160].Code and string.find(byFrame[160].Code, "Part_Icles:Activate()", 1, true) ~= nil and byFrame[160].Emitter == false
+	)
 	local script = byFrame[170]
 	check("other code on Subtitles is a cue holding it", script and script.Object == nil and script.Effect == "Event code" and string.find(script.Code, "Instance.new(\"Highlight\")", 1, true) ~= nil)
 	check("an empty event on Subtitles is left out", byFrame[180] == nil and result.Skipped.Subtitles == 1, result.Skipped.Subtitles)
@@ -1206,9 +1292,9 @@ end)]])
 		end
 	end
 	check("code that can't run in game is a warning when exporting", codeWarning ~= nil and string.find(codeWarning, "frame 30", 1, true) ~= nil, codeWarning)
-	check("and its Function warns when it runs instead of doing nothing quietly", string.find(source, '\t\t\twarn("[Moon VFX] Cue [30] \\"Barrel\\" runs event code from Moon that uses Crate', 1, true) ~= nil)
+	check("and its Function warns when it runs instead of doing nothing quietly", string.find(source, '\t\t\twarn("[VFX Exporter] Cue [30] \\"Barrel\\" runs event code from Moon that uses Crate', 1, true) ~= nil)
 	check("what the code makes goes to the sequence's cleaner", string.find(source, "\t\t\thighlight.Parent = victim\n\t\t\tself:AddToCleaner(highlight)\n", 1, true) ~= nil and string.find(source, "\t\t\tend)\n\t\t\tself:AddToCleaner(connection)\n", 1, true) ~= nil)
-	check("the Function gets the sequence as self", string.find(source, "Function = function(self, effect, character, cue, data)", 1, true) ~= nil)
+	check("the Function gets the sequence as self", string.find(source, "Function = function(self, effect, character, cue, data, includeScreenEffects)", 1, true) ~= nil)
 	check("its loops don't use ipairs or pairs", string.find(source, "ipairs", 1, true) == nil and string.find(source, "for _, child in attachment:GetChildren() do", 1, true) ~= nil)
 
 	-- In game: the copy follows the root, and the code's connection drives the copy's beams.
@@ -1329,6 +1415,8 @@ do
 
 	local character = Instance.new("Model", { Name = "Character" })
 	Instance.new("Part", { Name = "HumanoidRootPart", Parent = character })
+	local players = Instance.new("Players", { Name = "Players", Parent = game })
+	players.LocalPlayer = Instance.new("Player", { Name = "Player1", Character = character, Parent = players })
 	local sequence = __load("Sequence").new(Fx, character)
 	local effect = sequence:Spawn(Fx.Cues[0], nil, vfx)
 	check("a camera effect starts in front of the camera", effect and cfNear(effect.CFrame, camera.CFrame * CFrame.new(0, 0, -3)))
@@ -1336,9 +1424,46 @@ do
 	step()
 	check("and follows the camera", effect and cfNear(effect.CFrame, camera.CFrame * CFrame.new(0, 0, -3)))
 
+	-- Another player's move doesn't put it in front of this player's camera.
+	local other = Instance.new("Model", { Name = "Other" })
+	Instance.new("Part", { Name = "HumanoidRootPart", Parent = other })
+	check("another player's camera effect isn't shown here", __load("Sequence").new(Fx, other):Spawn(Fx.Cues[0], nil, vfx) == nil)
+
+	-- Play's IncludeScreenEffects says whether this player sees them, whoever's move it is.
+	local included = __load("Sequence").new(Fx, other)
+	included:Play(nil, nil, vfx, { IncludeScreenEffects = true })
+	included:Stop()
+	local shown = included:Spawn(Fx.Cues[0], nil, vfx)
+	check("IncludeScreenEffects = true shows another player's camera effect here", shown ~= nil and cfNear(shown.CFrame, camera.CFrame * CFrame.new(0, 0, -3)))
+	included:Stop()
+	check("and Stop removes it", shown and shown.Parent == nil)
+	local excluded = __load("Sequence").new(Fx, character)
+	excluded:Play(nil, nil, vfx, { IncludeScreenEffects = false })
+	excluded:Stop()
+	check("IncludeScreenEffects = false hides this player's own", excluded:Spawn(Fx.Cues[0], nil, vfx) == nil)
+	local inWorld = excluded:Spawn({ Effect = "A2", Offset = CFrame.new(0, 0, -3) }, nil, vfx)
+	check("but not the VFX in the world", inWorld ~= nil and inWorld.Parent ~= nil)
+	local hiddenZoom = loadData(fovSource)
+	excluded:Spawn(hiddenZoom.Cues[230], nil, vfx)
+	for _ = 1, 6 do
+		step()
+	end
+	check("camera changes too", camera.FieldOfView == 60, camera.FieldOfView)
+	excluded:Stop()
+	-- And it tells the cues' Functions, so they can show their own only to those players too.
+	local told = {}
+	local note = { Effect = "Note", Function = function(_self, _effect, _character, _cue, _data, includeScreenEffects)
+		table.insert(told, includeScreenEffects)
+	end }
+	sequence:Spawn(note, nil, vfx)
+	__load("Sequence").new(Fx, other):Spawn(note, nil, vfx)
+	included:Spawn(note, nil, vfx)
+	excluded:Spawn(note, nil, vfx)
+	check("a Function is told whether this player sees the screen effects", told[1] == true and told[2] == false and told[3] == true and told[4] == false, `{told[1]} {told[2]} {told[3]} {told[4]}`)
+	check("options that aren't a table are an error", not pcall(excluded.Play, excluded, nil, nil, vfx, true))
+	check("and so is an IncludeScreenEffects that isn't true or false", not pcall(excluded.Play, excluded, nil, nil, vfx, { IncludeScreenEffects = "yes" }))
+
 	-- The field of view zooms for the player whose character it is, and goes back when it stops.
-	local players = Instance.new("Players", { Name = "Players", Parent = game })
-	players.LocalPlayer = Instance.new("Player", { Name = "Player1", Character = character, Parent = players })
 	local zoom = loadData(fovSource)
 	sequence:Spawn(zoom.Cues[230], nil, vfx)
 	for _ = 1, 6 do
@@ -1532,7 +1657,19 @@ do
 	check("a keyed screen effect becomes a cue where its keys start", v ~= nil and v.Frame == 193 and v.Screen ~= nil, v and v.Frame)
 	local keys = v and v.Screen.Keys.ImageTransparency
 	check("its keys are timed from the cue, in seconds", keys and keys[1].Time == 0 and keys[2].Time == 1.2167 and keys[3].Time == 1.35 and keys[1].Style == "Sine" and keys[1].Direction == "Out")
-	check("an overlay Moon wasn't showing starts see-through and full-screen", v and v.Screen.Properties.BackgroundTransparency == 1 and v.Screen.Properties.ImageTransparency == 1 and v.Notes[1] ~= nil)
+	check("an overlay Moon wasn't showing starts see-through", v and v.Screen.Properties.BackgroundTransparency == 1 and v.Screen.Properties.ImageTransparency == 1)
+	local tiles = {}
+	for _, child in v and v.Screen.Children or {} do
+		tiles[child.Name] = child
+	end
+	check(
+		"with Moon closed, its vignette is Moon's own: four images tiling the screen",
+		v and v.Screen.Properties.Image == "rbxassetid://4764912210" and v.Screen.Properties.Size.X.Scale == 0.53333336
+			and tiles.UR and tiles.UR.Mirrors and tiles.UR.Properties.Image == "rbxassetid://4764912960"
+			and tiles.LL and tiles.LL.Children and tiles.LL.Children[1].Name == "LR" and tiles.LL.Children[1].Mirrors
+			and #v.Notes == 0,
+		v and v.Notes[1]
+	)
 	local blur = byEffect.Blur
 	check("a blur becomes a post-effect cue", blur ~= nil and blur.Frame == 30 and blur.Screen.ClassName == "BlurEffect" and blur.Screen.Properties.Enabled == true)
 	check("screen-effect cues have no VFX object", v and v.Object == nil and blur and blur.Object == nil)
@@ -1542,7 +1679,7 @@ do
 	local chunk, compileError = loadstring(source)
 	check("a module with screen effects compiles", chunk ~= nil, compileError)
 	check("a screen effect is data: its class, look and keys", string.find(source, '{ Effect = "Vignette", Screen = "ImageLabel", Properties = {', 1, true) ~= nil and string.find(source, "}, Keys = {", 1, true) ~= nil and string.find(source, ", Function = ", 1, true) == nil)
-	check("and says who sees them", string.find(source, "-- Screen, Lighting and camera effects show only for the player whose character played them.", 1, true) ~= nil and string.find(source, "ScreenEffectsForEveryone", 1, true) == nil)
+	check("and says who sees them", string.find(source, "-- Screen, Lighting and camera effects show only for the player whose character played them,\n-- unless Play is told otherwise: sequence:Play(track, data, VFX, { IncludeScreenEffects = true }).", 1, true) ~= nil and string.find(source, "ScreenEffectsForEveryone", 1, true) == nil)
 	check("and that it plays on the client", string.find(source, "-- Play it on the client (from a LocalScript)", 1, true) ~= nil)
 
 	local character = Instance.new("Model", { Name = "Character" })
@@ -1553,7 +1690,7 @@ do
 	local camera = Instance.new("Camera", { Name = "Camera" })
 	workspace.CurrentCamera = camera
 
-	local Move = loadData(source, { UDim2 = UDim2, Enum = Enum })
+	local Move = loadData(source, { UDim2 = UDim2, Enum = Enum, Color3 = Color3 })
 	local sequence = __load("Sequence").new(Move, character)
 
 	local cue = Move.Cues[193]
@@ -2232,7 +2369,7 @@ do
 	local bar = Instance.new("Frame", { Name = "MenuBar" })
 	local options = Instance.new("TextButton", { Name = "Options", Text = "Options", TextColor3 = "white", TextTransparency = 0, Parent = bar })
 	-- A copy taken while Moon's menus were disabled.
-	local copy = Instance.new("TextButton", { Name = "MoonVFXExporterButton", Text = "Export VFX", TextColor3 = "grey", TextTransparency = 0, Parent = bar })
+	local copy = Instance.new("TextButton", { Name = "VFXExporterButton", Text = "Export VFX", TextColor3 = "grey", TextTransparency = 0, Parent = bar })
 
 	local hook = setmetatable({ Watchers = {} }, MoonHook)
 	hook:WatchLook(options, copy)
@@ -2321,6 +2458,965 @@ do
 		check("theme change repaints", repainted)
 		ui:Destroy()
 	end
+end
+
+-- Eclipse Animator ---------------------------------------------------------------------------
+
+local EclipseCurves = __load("EclipseCurves")
+local EclipseReader = __load("EclipseReader")
+
+check("bezier ease ends", Easing.bezier(0, 0.42, 0, 0.58, 1) == 0 and Easing.bezier(1, 0.42, 0, 0.58, 1) == 1)
+check("symmetric bezier ease is halfway at halfway", near(Easing.bezier(0.5, 0.42, 0, 0.58, 1), 0.5, 1e-6))
+check("bezier ease through Easing.get", near(Easing.get({ Type = "Bezier", Params = { Bezier = { 0, 0, 1, 1 } } })(0.3), Easing.bezier(0.3, 0, 0, 1, 1)))
+
+-- Eclipse keys as SaveReader keys, to sample: { frame, value, data } each.
+local function curve(specs)
+	local keys = {}
+	for _, spec in specs do
+		table.insert(keys, { Frame = spec[1], Values = { spec[2] }, Data = spec[3] or {} })
+	end
+	local out = {}
+	for _, key in EclipseCurves.track(keys) do
+		table.insert(out, { Time = key.Frame, Value = key.Values[1], Ease = key.Ease })
+	end
+	return out
+end
+
+do
+	local two = curve({ { 0, 0 }, { 30, 1 } })
+	local points = two[1].Ease and two[1].Ease.Params.Bezier
+	check("two automatic Eclipse keys are one Bezier ease", #two == 2 and two[1].Ease.Type == "Bezier" and points and near(points[1], 1 / 3, 1e-6) and near(points[2], 0, 1e-6) and near(points[3], 2 / 3, 1e-6) and near(points[4], 1, 1e-6), points and table.concat(points, ", "))
+
+	-- Values from Eclipse Animator's own interpolation code, for the same keys.
+	local reference = {
+		{ "rising", { { 0, 0 }, { 10, 2 }, { 40, 3 } }, { [5] = 0.875, [18.25] = 2.618921757, [30] = 2.962962866 } },
+		{ "uneven", { { 0, 1 }, { 4, 3 }, { 9, 3.5 }, { 25, 8 }, { 26, 2 } }, { [2] = 1.85, [6.5] = 3.37472105, [15.8] = 5.47337532, [25.5] = 5 } },
+		{
+			"unclamped",
+			{ { 0, 0, { HandleType = "Automatic" } }, { 10, 5, { HandleType = "Automatic" } }, { 15, 2, { HandleType = "Automatic" } }, { 30, 6, { HandleType = "Automatic" } } },
+			{ [6.75] = 4.026857376, [12] = 4.057142735, [20] = 1.910052896 },
+		},
+		{ "mixed", { { 0, 0 }, { 10, 4, { EasingStyle = "Quad", EasingDirection = "Out" } }, { 20, 5 }, { 35, 1 } }, { [5] = 1.633989215, [15] = 4.75, [27] = 3.218231201 } },
+	}
+	for _, case in reference do
+		local keys = curve(case[2])
+		for frame, expected in case[3] do
+			local got = Sampler.sample(keys, frame)
+			check(`Eclipse curve "{case[1]}" at frame {frame} matches Eclipse`, near(got, expected, 1e-5), got)
+		end
+	end
+
+	local quad = curve({ { 0, 0, { EasingStyle = "Quad", EasingDirection = "Out" } }, { 10, 1 } })
+	check("an Eclipse Quad key keeps its ease", quad[1].Ease.Type == "Quad" and quad[1].Ease.Params.Direction == "Out" and #quad == 2)
+	local elastic = curve({ { 0, 0, { EasingStyle = { EnumType = "EasingStyle", Name = "Elastic" } } }, { 10, 1 } })
+	check("an Automatic direction is Out for Elastic", elastic[1].Ease.Params.Direction == "Out")
+	local reversed = curve({ { 0, 0, { EasingStyle = "Quad", EasingDirection = "In", Reversed = true } }, { 10, 1 } })
+	check("a reversed ease turns In to Out", reversed[1].Ease.Params.Direction == "Out")
+	local constant = curve({ { 0, 0, { EasingStyle = "Constant" } }, { 10, 1 } })
+	check("Constant holds", constant[1].Ease.Type == "Constant" and Sampler.sample(constant, 9) == 0)
+
+	-- A Vector3 whose parts curve differently is sampled at every frame.
+	local keys = {
+		{ Frame = 0, Values = { 0, 0, 0 }, Data = {} },
+		{ Frame = 10, Values = { 4, 1, -2 }, Data = {} },
+		{ Frame = 30, Values = { 5, 7, -1 }, Data = {} },
+	}
+	local sampled = EclipseCurves.track(keys)
+	local exact = true
+	for _, key in sampled do
+		if key.Frame % 1 ~= 0 then
+			exact = false
+		end
+	end
+	check("a Vector3 curving differently per axis gets sampled keys", #sampled > 3 and exact and sampled[#sampled].Frame == 30, #sampled)
+
+	local turned = CFrame.new(1, 2, 3) * CFrame.Angles(0.3, 1.2, -0.4)
+	check("a CFrame as numbers and back", cfNear(EclipseCurves.toCFrame(EclipseCurves.cframeValues(turned)), turned))
+end
+
+-- JSON as Eclipse writes it.
+local function json(v: any): string
+	local kind = type(v)
+	if kind == "nil" then
+		return "null"
+	elseif kind == "boolean" then
+		return tostring(v)
+	elseif kind == "number" then
+		return string.format("%.17g", v)
+	elseif kind == "string" then
+		return '"' .. string.gsub(string.gsub(string.gsub(v, "\\", "\\\\"), '"', '\\"'), "\n", "\\n") .. '"'
+	end
+	if #v > 0 or next(v) == nil then
+		local parts = {}
+		for _, item in v do
+			table.insert(parts, json(item))
+		end
+		return "[" .. table.concat(parts, ",") .. "]"
+	end
+	local parts = {}
+	for key, item in v do
+		table.insert(parts, json(tostring(key)) .. ":" .. json(item))
+	end
+	table.sort(parts)
+	return "{" .. table.concat(parts, ",") .. "}"
+end
+
+-- Eclipse's typed JSON (its project format) for a value.
+local function doc(v: any): any
+	local kind = typeof(v)
+	if kind == "CFrame" then
+		return { t = "cf", v = { v:GetComponents() } }
+	elseif kind == "Vector3" then
+		return { t = "v3", v = { v.X, v.Y, v.Z } }
+	elseif kind == "Color3" then
+		return { t = "Color3", v = { v.R, v.G, v.B } }
+	elseif kind == "Vector2" then
+		return { t = "Vector2", v = { v.X, v.Y } }
+	elseif kind == "table" then
+		local entries = {}
+		for key, item in v do
+			table.insert(entries, { key, doc(item) })
+		end
+		table.sort(entries, function(a, b)
+			return tostring(a[1]) < tostring(b[1])
+		end)
+		return { t = "table", v = entries }
+	end
+	return v
+end
+
+-- Eclipse's keyframe JSON for a key.
+local function kf(v: any): any
+	local kind = typeof(v)
+	if kind == "CFrame" then
+		return { C = { v:GetComponents() } }
+	elseif kind == "table" then
+		local flat = {}
+		for key, item in v do
+			table.insert(flat, key)
+			table.insert(flat, kf(item))
+		end
+		return { T = flat }
+	end
+	return v
+end
+
+-- An Eclipse project as Eclipse saves it (see EclipseReader). Each entry: Rig, and optionally
+-- Properties (rows), Joints (tracks), Events ({ Frame, Duration, Name, Parameter, CodeBegin,
+-- CodeEnd, Emits }), SequenceAttributes.
+local function eclipseProject(name: string, attributes: { [string]: any }, entries: { any })
+	local storage = game:GetService("ServerStorage")
+	local root = storage:FindFirstChild("Eclipse Animator Saves") or folder("Eclipse Animator Saves", storage)
+	local saves = root:FindFirstChild("EclipseAnimator_Saves") or folder("EclipseAnimator_Saves", root)
+	local save = folder(name, saves)
+	save:SetAttribute("EclipseSave", true)
+	for key, v in attributes do
+		save:SetAttribute(key, v)
+	end
+	local rigs = folder("Rigs", save)
+	for order, spec in entries do
+		local entry = folder(spec.Rig.Name, rigs)
+		value("ObjectValue", "Rig", spec.Rig, entry)
+		entry:SetAttribute("RigName", spec.Rig.Name)
+		entry:SetAttribute("RigClass", spec.Rig.ClassName)
+		entry:SetAttribute("Order", order)
+		local sequence = Instance.new("KeyframeSequence", { Name = "Animation", Parent = entry })
+		for key, v in spec.SequenceAttributes or {} do
+			sequence:SetAttribute(key, v)
+		end
+		if spec.Properties then
+			value("StringValue", "EclipseProperties", json(doc({ version = 1, tracks = spec.Properties })), sequence)
+		end
+		if spec.Joints then
+			value("StringValue", "EclipseKeyframeData", json({ version = 2, quaternionInterpolation = 2, tracks = spec.Joints }), sequence)
+		end
+		if spec.Events then
+			local events = folder("EclipseEvents", sequence)
+			events:SetAttribute("Version", 8)
+			events:SetAttribute("Enabled", true)
+			for i, event in spec.Events do
+				local node = folder("Event" .. i, events)
+				node:SetAttribute("Frame", event.Frame)
+				node:SetAttribute("Duration", event.Duration or 0)
+				node:SetAttribute("EventName", event.Name or "Event")
+				node:SetAttribute("Parameter", event.Parameter or "")
+				node:SetAttribute("Enabled", true)
+				value("StringValue", "Markers", json({ { Name = event.Name or "Event", Parameter = event.Parameter or "" } }), node)
+				value("StringValue", "CodeBegin", event.CodeBegin or "", node)
+				value("StringValue", "CodeEnd", event.CodeEnd or "", node)
+				value("StringValue", "Emits", json(event.Emits or {}), node)
+			end
+		end
+	end
+	return save
+end
+
+local function step1(name: string, class: string, index: number?)
+	return { Name = name, Class = class, Index = index or 1 }
+end
+
+do
+	resetGame()
+	local ws = game:GetService("Workspace")
+	local hero = Instance.new("Model", { Name = "Hero", Parent = ws })
+	local hrp = Instance.new("Part", { Name = "HumanoidRootPart", CFrame = CFrame.new(0, 3, 0), Parent = hero })
+	local torso = Instance.new("Part", { Name = "Torso", CFrame = CFrame.new(0, 3, 0), Parent = hero })
+	local arm = Instance.new("Part", { Name = "Right Arm", CFrame = CFrame.new(1.5, 3, 0), Parent = hero })
+	Instance.new("Humanoid", { Name = "Humanoid", Parent = hero })
+	Instance.new("Motor6D", { Name = "RootJoint", Part0 = hrp, Part1 = torso, C0 = CFrame.new(), C1 = CFrame.new(), Parent = hrp })
+	local shoulder = Instance.new("Motor6D", { Name = "Right Shoulder", Part0 = torso, Part1 = arm, C0 = CFrame.new(1, 0.5, 0), C1 = CFrame.new(-0.5, 0.5, 0), Parent = torso })
+	local grip = Instance.new("Attachment", { Name = "RightGripAttachment", CFrame = CFrame.new(0, -1, 0), Parent = arm })
+	local spark = Instance.new("ParticleEmitter", { Name = "Spark", Parent = grip })
+	local swish = Instance.new("Trail", { Name = "Swish", Enabled = false, Parent = grip })
+
+	local slash = Instance.new("Part", { Name = "Slash", CFrame = CFrame.new(0, 3, -5), Parent = ws })
+	local a1 = Instance.new("Attachment", { Name = "A1", Parent = slash })
+	Instance.new("ParticleEmitter", { Name = "Burst", Parent = a1 })
+
+	local lamp = Instance.new("Part", { Name = "Lamp", CFrame = CFrame.new(0, 6, -3), Parent = ws })
+	local glow = Instance.new("PointLight", { Name = "Glow", Brightness = 0, Parent = lamp })
+
+	local camera = Instance.new("Model", { Name = "Cam", Parent = ws })
+	local cameraRoot = Instance.new("Part", { Name = "RootPart", Parent = camera })
+	local fovPart = Instance.new("Part", { Name = "FovPart", Parent = camera })
+	Instance.new("Part", { Name = "CamPart", Parent = camera })
+	Instance.new("Motor6D", { Name = "FovPart", Part0 = cameraRoot, Part1 = fovPart, C0 = CFrame.new(), C1 = CFrame.new(), Parent = cameraRoot })
+	local fovFolder = folder("FieldOfView", camera)
+	value("NumberValue", "default", 70, fovFolder)
+
+	local vignette = Instance.new("Model", { Name = "Vignette", Parent = ws })
+	vignette:SetAttribute("EclipseEffectObject", 1)
+	vignette:SetAttribute("EffectKind", "Vignette")
+	vignette:SetAttribute("EffectColor", Color3.new(1, 0, 0))
+
+	local prop = Instance.new("Part", { Name = "Prop", Parent = ws })
+
+	local save = eclipseProject("Combo", { FPS = 30, EclipseTimelineEnd = 60 }, {
+		{
+			Rig = hero,
+			SequenceAttributes = { EclipseMasterControl = true, EclipseMasterRest = CFrame.new() },
+			Joints = {
+				{
+					path = { { name = "Right Arm", class = "Part", index = 1 } },
+					keys = { { frame = 0, data = kf({ C0 = CFrame.new(1, 0.5, 0), EasingStyle = "Linear" }) }, { frame = 20, data = kf({ C0 = CFrame.new(1, 2.5, 0) }) } },
+				},
+				{
+					path = { { name = "HumanoidRootPart", class = "Part", index = 1 } },
+					keys = { { frame = 0, data = kf({ C0 = CFrame.new(), EasingStyle = "Linear" }) }, { frame = 30, data = kf({ C0 = CFrame.new(0, 0, -10) }) } },
+				},
+			},
+			Events = {
+				{ Frame = 5, Emits = { { Mode = "Exact", Action = "Enable", Path = { step1("Right Arm", "Part"), step1("RightGripAttachment", "Attachment"), step1("Swish", "Trail") } } } },
+				{ Frame = 20, Name = "Sparks", Emits = { { Mode = "Exact", Count = 7, Path = { step1("Right Arm", "Part"), step1("RightGripAttachment", "Attachment"), step1("Spark", "ParticleEmitter") } } } },
+				{ Frame = 25, Emits = { { Mode = "Exact", Action = "Disable", Path = { step1("Right Arm", "Part"), step1("RightGripAttachment", "Attachment"), step1("Swish", "Trail") } } } },
+				{ Frame = 30, Duration = 15, Name = "Shine", Parameter = "Gold", CodeBegin = 'local h = Instance.new("Highlight")\nh.Name = parameter\nh.Parent = rig\ncontext.h = h', CodeEnd = "context.h:Destroy()" },
+				{ Frame = 40, Name = "Footstep" },
+				{ Frame = 41, Emits = { { Mode = "Exact", Path = { step1("Right Arm", "Part"), step1("RightGripAttachment", "Attachment") } } } },
+			},
+		},
+		{
+			Rig = slash,
+			Events = { { Frame = 12, Emits = { { Mode = "All", Path = { step1("A1", "Attachment") } } } } },
+		},
+		{
+			Rig = glow,
+			Properties = {
+				{
+					id = "Brightness",
+					default = 0,
+					enabled = true,
+					keys = {
+						[0] = { C0 = CFrame.new(0, 0, 0), PropertyValue = 0, EasingStyle = "Quad", EasingDirection = "Out" },
+						[6] = { C0 = CFrame.new(5, 0, 0), PropertyValue = 5 },
+						[18] = { C0 = CFrame.new(0, 0, 0), PropertyValue = 0 },
+					},
+				},
+			},
+		},
+		{
+			Rig = camera,
+			Joints = {
+				{
+					path = { { name = "FovPart", class = "Part", index = 1 } },
+					keys = { { frame = 0, data = kf({ C0 = CFrame.new(), EasingStyle = "Linear" }) }, { frame = 10, data = kf({ C0 = CFrame.new(0, -20, 0) }) } },
+				},
+			},
+		},
+		{
+			Rig = vignette,
+			Properties = {
+				{
+					id = "Transparency",
+					default = 1,
+					enabled = true,
+					keys = {
+						[0] = { C0 = CFrame.new(1, 0, 0), PropertyValue = 1, EasingStyle = "Linear" },
+						[10] = { C0 = CFrame.new(0.2, 0, 0), PropertyValue = 0.2, EasingStyle = "Linear" },
+						[20] = { C0 = CFrame.new(1, 0, 0), PropertyValue = 1 },
+					},
+				},
+			},
+		},
+		{
+			Rig = prop,
+			Events = { { Frame = 3, Name = "Hidden", CodeBegin = "print(1)" } },
+		},
+	})
+	local organization = folder("EclipseTrackOrganization", save)
+	local item = folder("Item1", organization)
+	item:SetAttribute("Kind", "Item")
+	item:SetAttribute("Enabled", false)
+	value("ObjectValue", "Target", prop, item)
+
+	local saves = EclipseReader.findSaves()
+	check("Eclipse projects are listed", #saves == 1 and saves[1].Name == "Combo" and saves[1].Source == "Eclipse" and saves[1].FPS == 30 and saves[1].Length == 60, #saves)
+
+	local anim = EclipseReader.load(save)
+	local byName = {}
+	for _, it in anim.Items do
+		byName[it.PathNames[#it.PathNames]] = it
+	end
+	check("an Eclipse rig is a Rig item", byName.Hero and byName.Hero.ItemType == "Rig" and byName.Hero.Instance == hero)
+	check("a switched-off item is left out, with a warning", byName.Prop == nil and string.find(table.concat(anim.Warnings, "\n"), "Prop is switched off", 1, true) ~= nil)
+	check("an Eclipse camera is a Camera item with its field of view", byName.Cam and byName.Cam.ItemType == "Camera" and byName.Cam.Tracks.FieldOfView and near(Sampler.sample(byName.Cam.Tracks.FieldOfView, 10), 50))
+	check("an Eclipse effect object is a ScreenEffect item", byName.Vignette and byName.Vignette.ItemType == "ScreenEffect")
+
+	local heroItem = byName.Hero
+	local shoulderJoint = nil
+	for _, joint in heroItem.Joints do
+		if joint.Motor == shoulder then
+			shoulderJoint = joint
+		end
+	end
+	check("an Eclipse joint names its Motor6D and keys its C0", shoulderJoint and shoulderJoint.Keyed == "C0" and #shoulderJoint.Track >= 2)
+	check("the master control is the rig's CFrame track", heroItem.Tracks.CFrame and cfNear(Sampler.sample(heroItem.Tracks.CFrame, 30), CFrame.new(0, 0, -10)))
+
+	local pose = RigPose.new(hero, hrp, heroItem.Tracks.CFrame, heroItem.Joints)
+	check("Eclipse rigs pose from their keyed C0", cfNear(pose:CFrameAt(arm, 20), CFrame.new(1.5, 5, -20 / 3)), tostring(pose:CFrameAt(arm, 20)))
+
+	local glowTrack = byName.Glow.Tracks.Brightness
+	check("an Eclipse property track keeps its eases", glowTrack and glowTrack[1].Ease.Type == "Quad" and glowTrack[2].Ease.Type == "Bezier", glowTrack and glowTrack[2].Ease and glowTrack[2].Ease.Type)
+
+	local markers = heroItem.Markers
+	check("Eclipse events become markers in order", #markers == 6 and markers[1].Frame == 5 and markers[4].Name == "Shine")
+	check("an Eclipse event keeps its parameter, duration and end code", markers[4].Parameter == "Gold" and markers[4].Width == 15 and markers[4].EndCode == "context.h:Destroy()")
+	check("an Eclipse emit is found from the rig", markers[2].Emits and markers[2].Emits[1] and markers[2].Emits[1].Instance == spark and markers[2].Emits[1].Count == 7)
+	check("switching an effect on and off is its Enabled track", byName.Swish and byName.Swish.Instance == swish and byName.Swish.Tracks.Enabled and #byName.Swish.Tracks.Enabled >= 2)
+
+	local result = Exporter.collect(anim, { EffectName = "Event" })
+	local cueNamed = {}
+	for _, cue in result.Cues do
+		cueNamed[cue.Effect] = cueNamed[cue.Effect] or cue
+	end
+
+	local sparks = cueNamed.Sparks
+	check("an Eclipse Exact emit spawns just that effect", sparks and sparks.Only and #sparks.Only == 1 and sparks.Only[1] == spark and sparks.Parent == "Right Arm")
+	check("an Eclipse emit's count is the cue's EmitCount", sparks and sparks.EmitCount == 7)
+	local burst = cueNamed.A1
+	check("an Eclipse All emit spawns the whole attachment", burst and burst.Object == a1 and burst.Only == nil)
+	check("its offset is from where the master control moved the rig", burst and cfNear(burst.Offset, CFrame.new(0, 0, -1)), burst and tostring(burst.Offset))
+
+	local glowCue = cueNamed.Shine
+	check("an Eclipse event's code gets Eclipse's locals", glowCue and glowCue.Locals and #glowCue.Locals == 3, glowCue and glowCue.Locals and #glowCue.Locals)
+	check("its end code runs after its duration", glowCue and glowCue.Adapted and glowCue.Adapted.EndCode == "context.h:Destroy()" and near(glowCue.EndDelay, 0.5))
+	check("a named Eclipse event with nothing else is a cue, like Moon's", cueNamed.Footstep ~= nil)
+	check("events that only switch or emit nothing aren't cues", cueNamed.Hero == nil and cueNamed["Event code"] == nil)
+
+	local swishCue = cueNamed.Swish
+	check("a switched effect replays its Enabled keys", swishCue and swishCue.Animation and swishCue.Animation.Keys.Enabled and swishCue.Animation.Keys.Enabled[1].Value == true and near(swishCue.Frame / result.FrameRate, 5 / 30), swishCue and swishCue.Frame)
+	local lightCue = cueNamed.Glow2 or nil
+	for _, cue in result.Cues do
+		if cue.Object == glow then
+			lightCue = cue
+		end
+	end
+	check("an Eclipse keyed light replays its Bezier keys", lightCue and lightCue.Animation and lightCue.Animation.Keys.Brightness[2].Style == "Bezier" and lightCue.Animation.Keys.Brightness[2].Bezier ~= nil)
+	check("an Eclipse camera's field of view is a Camera cue", cueNamed.FieldOfView and cueNamed.FieldOfView.Animation.Kind == "Camera")
+
+	local screen = cueNamed.Vignette
+	check("an Eclipse vignette is a screen cue of four images", screen and screen.Screen and screen.Screen.ClassName == "CanvasGroup" and #screen.Screen.Children == 4 and screen.Screen.Path[1] == "Tile1")
+	local fade = screen and screen.Screen.Keys.ImageTransparency
+	check("its transparency keys", fade and #fade == 3 and near(fade[2].Time, 0.3333, 1e-3) and near(fade[2].Value, 0.2, 1e-6), fade and #fade)
+	check("its colour is the effect's", screen and screen.Screen.Children[1].Properties.ImageColor3 == Color3.new(1, 0, 0))
+
+	-- The module it makes loads, and its Function runs Eclipse's code.
+	local source, formatWarnings = Formatter.format({
+		TableName = "Combo",
+		Lifetime = 2,
+		CueTolerance = 0.1,
+		Runtime = true,
+		FPS = result.FrameRate,
+		Cues = result.Cues,
+		Source = "Eclipse",
+	})
+	check("the Eclipse export writes without warnings", #formatWarnings == 0, formatWarnings[1])
+	check("it writes Bezier keys", string.find(source, '"Bezier", {', 1, true) ~= nil)
+	check("it writes EmitCount", string.find(source, "EmitCount = 7", 1, true) ~= nil)
+	check("it says Eclipse, not Moon", string.find(source, "Eclipse's scene", 1, true) ~= nil and string.find(source, "another rig in Moon", 1, true) == nil)
+	check("its Function starts with Eclipse's locals", string.find(source, "local rig = character", 1, true) ~= nil and string.find(source, 'local parameter = "Gold"', 1, true) ~= nil and string.find(source, "local context = {}", 1, true) ~= nil)
+
+	local Sequence = __load("Sequence")
+	local Combo = loadData(source, { Color3 = Color3, UDim2 = UDim2, Vector2 = Vector2, task = task })
+	local sequence = Sequence.new(Combo, hero)
+	local glowFrame = nil
+	for frame, cue in Combo.Cues do
+		if cue.Effect == "Shine" and cue.Function then
+			glowFrame = frame
+		end
+	end
+	table.clear(warnings)
+	sequence:Spawn(Combo.Cues[glowFrame], nil, {})
+	local highlight = hero:FindFirstChild("Gold")
+	check("the Eclipse Function runs with rig and parameter", highlight ~= nil and highlight.ClassName == "Highlight" and #warnings == 0, warnings[1])
+	for _ = 1, 31 do
+		step()
+	end
+	check("its end code runs once the event is over", hero:FindFirstChild("Gold") == nil)
+	sequence:Stop()
+
+	-- A Bezier key plays its curve.
+	local held = Instance.new("Part", { Name = "Held", Transparency = 0, Parent = game:GetService("Workspace") })
+	Sequence.Animate(held, { Transparency = { { 0, 0, "Bezier", { 0.42, 0, 0.58, 1 } }, { 1, 1 } } })
+	for _ = 1, 30 do
+		step()
+	end
+	check("the Sequence plays a Bezier key", near(held.Transparency, Easing.bezier(0.5, 0.42, 0, 0.58, 1), 1e-3), held.Transparency)
+end
+
+-- Eclipse's other screen effects.
+do
+	resetGame()
+	local ws = game:GetService("Workspace")
+	local function effect(name: string, kind: string, attributes: { [string]: any }?)
+		local model = Instance.new("Model", { Name = name, Parent = ws })
+		model:SetAttribute("EclipseEffectObject", 1)
+		model:SetAttribute("EffectKind", kind)
+		for key, v in attributes or {} do
+			model:SetAttribute(key, v)
+		end
+		return model
+	end
+	local function item(model, tracks)
+		return {
+			Index = 1,
+			Path = "Game.Workspace." .. model.Name,
+			PathNames = { "Game", "Workspace", model.Name },
+			PathTypes = { "DataModel", "Workspace", "Model" },
+			ItemType = "ScreenEffect",
+			Instance = model,
+			Tracks = tracks,
+			Defaults = {},
+			Markers = {},
+			Joints = {},
+		}
+	end
+	local function keys(list)
+		local out = {}
+		for _, entry in list do
+			table.insert(out, { Time = entry[1], Value = entry[2], Ease = { Type = entry[3] or "Linear", Params = {} } })
+		end
+		return out
+	end
+
+	local warnings = {}
+	local cover = effect("Flash", "Screen Cover", { EffectColor = Color3.new(1, 1, 1) })
+	local coverCues = Exporter.eclipseScreenCues(item(cover, { Transparency = keys({ { 4, 1 }, { 6, 0 }, { 12, 1 } }) }), 30, 60, warnings)
+	local flash = coverCues[1]
+	check("an Eclipse screen cover is a full-screen CanvasGroup", #coverCues == 1 and flash.Screen.ClassName == "CanvasGroup" and flash.Frame == 4 and flash.Screen.Properties.Size == UDim2.fromScale(1, 1))
+	check("its transparency is its background's", flash and flash.Screen.Keys.BackgroundTransparency and #flash.Screen.Keys.BackgroundTransparency == 3)
+
+	local impact = effect("Impact", "Impact Frames")
+	local images = keys({ { 0, "", "Constant" }, { 10, "builtin:White", "Constant" }, { 12, "builtin:Burst", "Constant" }, { 14, "", "Constant" } })
+	local impactCues = Exporter.eclipseScreenCues(item(impact, { Image = images, Transparency = keys({ { 10, 0 }, { 14, 0 } }) }), 30, 60, warnings)
+	check("Eclipse impact frames are one cue per image", #impactCues == 2 and impactCues[1].Frame == 10 and impactCues[2].Frame == 12, #impactCues)
+	local burst = impactCues[2] and impactCues[2].Screen.Children
+	check("a Burst frame has its rays", burst and burst[1].Name == "ImpactImage" and #burst[1].Children == 25)
+	check("each shows until the next", impactCues[1] and near(impactCues[1].Screen.Hold, 2 / 30, 1e-3))
+
+	local bars = effect("Bars", "Letterbox", { EffectStyle = "Solid", EffectColor = Color3.new(0, 0, 0) })
+	-- Built as Eclipse does for a 0.1 bar in a view 10 studs tall: 1 plus 2.5 overscan, 5.75 from the middle.
+	Instance.new("Part", { Name = "Top", Size = Vector3.new(20, 3.5, 0.02), CFrame = CFrame.new(0, 5.75, -5), Parent = bars })
+	Instance.new("Part", { Name = "Bottom", Size = Vector3.new(20, 3.5, 0.02), CFrame = CFrame.new(0, -5.75, -5), Parent = bars })
+	local barCues = Exporter.eclipseScreenCues(item(bars, { Transparency = keys({ { 0, 1 }, { 10, 0 } }) }), 30, 60, warnings)
+	local letterbox = barCues[1]
+	local topBar = letterbox and letterbox.Screen.Children[1]
+	check("an Eclipse letterbox is two bars", letterbox and letterbox.Screen.ClassName == "Frame" and #letterbox.Screen.Children == 2 and letterbox.Screen.Path[1] == "Top")
+	check("its bars cover what they do in Eclipse", topBar and near(topBar.Properties.Size.Y.Scale, 0.1, 1e-6), topBar and topBar.Properties.Size.Y.Scale)
+	check("it shows until the animation ends", letterbox and near(letterbox.Screen.Hold, 2, 1e-6))
+
+	-- A letterbox whose bars' sizes are keyed (an older Eclipse letterbox's) grows its bars.
+	local growing = effect("Growing", "Letterbox", { EffectStyle = "Solid", EffectColor = Color3.new(0, 0, 0) })
+	Instance.new("Part", { Name = "Top", Size = Vector3.new(20, 3.5, 0.02), CFrame = CFrame.new(0, 5.75, -5), Parent = growing })
+	Instance.new("Part", { Name = "Bottom", Size = Vector3.new(20, 3.5, 0.02), CFrame = CFrame.new(0, -5.75, -5), Parent = growing })
+	local grown = Exporter.eclipseScreenCues(item(growing, {
+		Transparency = keys({ { 0, 0 } }),
+		TopSize = keys({ { 0, Vector3.new(20, 2.5, 0.02) }, { 10, Vector3.new(20, 3.5, 0.02) } }),
+	}), 30, 60, warnings)[1]
+	local growingBar = grown and grown.Screen.Children[1]
+	local sizes = growingBar and growingBar.Keys and growingBar.Keys.Size
+	check("a letterbox's keyed bar size is that bar's own keys", sizes and near(sizes[1].Value.Y.Scale, 0.05, 1e-6) and near(sizes[#sizes].Value.Y.Scale, 0.1, 1e-6) and near(sizes[#sizes].Time, 1 / 3, 1e-3), sizes and #sizes)
+	local grownSource = Formatter.format({ TableName = "Fx", Lifetime = 1, CueTolerance = 0.1, Runtime = true, FPS = 30, Cues = { grown } })
+	check("written on the bar", string.find(grownSource, '{ Name = "Top", ClassName = "Frame", Properties = {', 1, true) ~= nil and string.find(grownSource, "\t\t\t}, Keys = {\n\t\t\t\tSize = { { 0, UDim2.new(1, 0, 0.05", 1, true) ~= nil, grownSource)
+
+	local Sequence = __load("Sequence")
+	Sequence.Preview = { GuiParent = Instance.new("Folder", { Name = "PreviewGui" }) }
+	local grownFx = loadData(grownSource, { UDim2 = UDim2, Enum = Enum, Color3 = Color3, Vector2 = Vector2 })
+	local bars2 = Sequence.new(grownFx, Instance.new("Model", { Name = "Character" })):Spawn(grownFx.Cues[0], nil, {})
+	local topBar2 = bars2 and bars2:FindFirstChild("Top")
+	for _ = 1, 25 do
+		step()
+	end
+	check("played, the bar grows", topBar2 and near(topBar2.Size.Y.Scale, 0.1, 1e-6), topBar2 and topBar2.Size.Y.Scale)
+
+	-- A letterbox made of effects is that model, in front of the camera, faded in by its keys.
+	local fancy = effect("Fancy", "Letterbox", { EffectStyle = "DoubleColors/1", EffectReferenceFOV = 70, EffectColor = Color3.new(1, 0, 0) })
+	local rigRoot = Instance.new("Part", { Name = "Root", CFrame = CFrame.new(0, 10, 0), Transparency = 1, Parent = fancy })
+	rigRoot:SetAttribute("EclipsePartRigRoot", true)
+	local plane = Instance.new("Part", { Name = "VFX", CFrame = CFrame.new(0, 10, -1.2), Transparency = 1, Parent = fancy })
+	local band = Instance.new("ParticleEmitter", { Name = "Band", Enabled = false, Parent = plane })
+	band:SetAttribute("EffectOriginalProperties", json({
+		Enabled = true,
+		Transparency = { t = "NumberSequence", v = { { 0, 0.2, 0 }, { 1, 1, 0 } } },
+		Color = { t = "ColorSequence", v = { { 0, { t = "Color3", v = { 1, 1, 1 } } }, { 1, { t = "Color3", v = { 0.5, 0.5, 0.5 } } } } },
+	}))
+	local fancyCues = Exporter.eclipseScreenCues(item(fancy, { Transparency = keys({ { 0, 1 }, { 10, 0 } }) }), 30, 60, warnings)
+	local lb = fancyCues[1]
+	check("a letterbox made of effects is spawned whole, in front of the camera", #fancyCues == 1 and lb.Object == fancy and lb.Parent == "Camera" and cfNear(lb.Offset, rigRoot.CFrame:ToObjectSpace(fancy:GetPivot())))
+	check("it isn't emitted, and shows until the animation ends", lb and lb.Emitter == false and near(lb.Lifetime, 2, 1e-6))
+	check("its keys fade and tint it", lb and lb.Animation.Keys.Transparency[1].Value == 1 and lb.Animation.Keys.Color[1].Value == Color3.new(1, 0, 0))
+
+	local fancySource = Formatter.format({ TableName = "Fx", Lifetime = 1, CueTolerance = 0.1, Runtime = true, FPS = 30, Cues = fancyCues })
+	check("written as a camera VFX that keeps its own lifetime", string.find(fancySource, '{ Effect = "Fancy", Parent = "Camera", Lifetime = 2, Offset = ', 1, true) ~= nil and string.find(fancySource, "Emitter = false", 1, true) ~= nil, fancySource)
+	local fancyFx = loadData(fancySource, { Color3 = Color3 })
+	local watcher = Instance.new("Model", { Name = "Watcher" })
+	Instance.new("Part", { Name = "HumanoidRootPart", Parent = watcher })
+	local camera = Instance.new("Camera", { Name = "Camera", CFrame = CFrame.new(0, 5, 0), Parent = ws })
+	ws.CurrentCamera = camera
+	local spawned = Sequence.new(fancyFx, watcher):Spawn(fancyFx.Cues[0], nil, { Fancy = fancy })
+	local copy = spawned and spawned:FindFirstChild("VFX") and spawned:FindFirstChild("VFX"):FindFirstChild("Band")
+	check("it starts faded out, its effects off", copy and copy.Enabled == false and copy.Transparency.Keypoints[1].Value == 1, copy and tostring(copy.Enabled))
+	for _ = 1, 25 do
+		step()
+	end
+	check("and fades in as Eclipse paints it", copy and copy.Enabled == true and near(copy.Transparency.Keypoints[1].Value, 0.2, 1e-6) and copy.Color.Keypoints[2].Value == Color3.new(0.5, 0, 0), copy and copy.Transparency.Keypoints[1].Value)
+	check("its invisible plane stays invisible", spawned and spawned:FindFirstChild("VFX").Transparency == 1)
+
+	-- A camera shake, as Eclipse makes one: strength 40 at frame 15, easing to nothing by 30.
+	local shake = effect("Shake", "Camera Shake", { EclipseTrackId = "AB" })
+	local shakeCues = Exporter.eclipseScreenCues(item(shake, {
+		Strength = keys({ { 0, 0, "Constant" }, { 15, 40 }, { 30, 0, "Constant" } }),
+		Speed = keys({ { 0, 12, "Constant" } }),
+	}), 30, 60, warnings)
+	local shaking = shakeCues[1]
+	local seed = (string.byte("A") * 31 + string.byte("B")) % 65521
+	check("an Eclipse camera shake is a cue from where it starts shaking", #shakeCues == 1 and shaking.Frame == 15 and shaking.Animation.Kind == "Shake", shaking and shaking.Frame)
+	local strength = shaking and shaking.Animation.Keys.Strength
+	check("its strength keys play from there", strength and #strength == 2 and strength[1].Time == 0 and strength[1].Value == 40 and near(strength[2].Time, 0.5, 1e-6) and strength[2].Value == 0)
+	check("its pattern is picked from its id, as Eclipse picks it", shaking and shaking.Animation.Seed == seed, shaking and shaking.Animation.Seed)
+	check("and starts where Eclipse's is by then", shaking and near(shaking.Animation.Phase, 6, 1e-6), shaking and shaking.Animation.Phase)
+	check("it ends with its keys", shaking and shaking.Animation.Hold == nil)
+	check("a shake that never shakes is no cue", #Exporter.eclipseScreenCues(item(effect("Still", "Camera Shake"), { Strength = keys({ { 0, 0 } }) }), 30, 60, warnings) == 0)
+
+	local shakeSource = Formatter.format({ TableName = "Fx", Lifetime = 1, CueTolerance = 0.1, Runtime = true, FPS = 30, Cues = shakeCues })
+	check("it's written as a Shake", string.find(shakeSource, `[15] = \{ Effect = "Shake", Target = "Shake", Seed = {seed}, Phase = 6, Keys = \{`, 1, true) ~= nil, shakeSource)
+
+	-- Played, it shakes the player's camera as Eclipse shakes its own, then puts it back.
+	camera.CFrame = CFrame.new(0, 5, 0)
+	local shakeFx = loadData(shakeSource)
+	Sequence.new(shakeFx, watcher):Spawn(shakeFx.Cues[15], nil, {})
+	step()
+	local phase = 6 + 12 / 60
+	local function noise(axis)
+		return math.noise(phase, seed * 0.017 + axis * 17.1, axis * 0.73) * 2
+	end
+	local power = 40 - 40 * (1 / 60) / 0.5
+	local turn = math.rad(power * 1.5)
+	local shaken = CFrame.new(0, 5, 0)
+		* CFrame.new(noise(1) * power * 0.15, noise(2) * power * 0.15, noise(3) * power * 0.15)
+		* CFrame.Angles(noise(4) * turn, noise(5) * turn, noise(6) * turn)
+	check("played, it shakes the camera as Eclipse does", cfNear(camera.CFrame, shaken), tostring(camera.CFrame))
+	for _ = 1, 40 do
+		step()
+	end
+	check("and puts the camera back when it's done", cfNear(camera.CFrame, CFrame.new(0, 5, 0)), tostring(camera.CFrame))
+	Sequence.Preview = nil
+	ws.CurrentCamera = nil
+end
+
+-- Eclipse's subtitles -----------------------------------------------------------------------------
+
+do
+	resetGame()
+	local ws = game:GetService("Workspace")
+	local rig = Instance.new("Model", { Name = "Speaker", Parent = ws })
+	Instance.new("Part", { Name = "HumanoidRootPart", Parent = rig })
+	Instance.new("Humanoid", { Name = "Humanoid", Parent = rig })
+	local save = eclipseProject("Talk", { FPS = 30, EclipseTimelineEnd = 150 }, { { Rig = rig } })
+
+	-- A style as Eclipse saves one: every field.
+	local function style(changes)
+		local out = { Words = {} }
+		for key, default in EclipseReader.SUBTITLE_DEFAULTS do
+			out[key] = default
+		end
+		for key, v in changes do
+			out[key] = v
+		end
+		return out
+	end
+	-- Eclipse's subtitle track: an events folder with one event per subtitle.
+	local function subtitleTrack(holder, events)
+		local list = folder("EclipseEvents", folder("EclipseSubtitles", holder))
+		list:SetAttribute("ProjectSubtitles", true)
+		for id, event in events do
+			local node = folder(id, list)
+			node:SetAttribute("Frame", event.Frame)
+			node:SetAttribute("Enabled", event.Enabled ~= false)
+			value("StringValue", "Subtitle", json(event.Cue), node)
+		end
+	end
+	local hello = {
+		Version = 1,
+		Duration = 90,
+		Entrance = "Pop",
+		Exit = "Fade",
+		InFrames = 6,
+		OutFrames = 12,
+		Order = 0,
+		Preset = "Clean",
+		Base = style({ Text = "Hello there", Speaker = "Guide", Size = 34, Color = "FFDC54" }),
+		Keys = { { Frame = 45, Ease = "Linear", Value = style({ Text = "Hello there", Speaker = "Guide", Size = 40, Color = "FFDC54" }) } },
+	}
+	local run = {
+		Version = 1,
+		Duration = 60,
+		Entrance = "Typewriter",
+		Exit = "None",
+		InFrames = 30,
+		OutFrames = 0,
+		Order = 2,
+		Base = style({ Text = "Run!", Position = "Top", Size = 500 }),
+		Keys = {},
+	}
+	subtitleTrack(save, { ["A-1"] = { Frame = 10, Cue = hello }, ["B-2"] = { Frame = 70, Cue = run }, ["C-3"] = { Frame = 5, Cue = hello, Enabled = false } })
+	-- Eclipse keeps a copy of the track on each item's animation too.
+	local animation = save:FindFirstChild("Rigs"):FindFirstChild("Speaker"):FindFirstChild("Animation")
+	subtitleTrack(animation, { ["A-1"] = { Frame = 10, Cue = hello } })
+
+	local anim = EclipseReader.load(save)
+	check("an Eclipse project's subtitles are read, each once", #anim.Subtitles == 2 and anim.Subtitles[1].Frame == 10 and anim.Subtitles[2].Frame == 70, #anim.Subtitles)
+	check("as Eclipse reads them, each field within what it can be", anim.Subtitles[2] and anim.Subtitles[2].Cue.Base.Size == 96 and anim.Subtitles[2].Cue.Base.Position == "Top")
+
+	local result = Exporter.collect(anim, { EffectName = "Event" })
+	local subtitles = {}
+	for _, cue in result.Cues do
+		if cue.Subtitle then
+			table.insert(subtitles, cue)
+		end
+	end
+	local first = subtitles[1] and subtitles[1].Subtitle
+	check("each subtitle is a cue at its frame", #subtitles == 2 and subtitles[1].Frame == 10 and subtitles[2].Frame == 70 and subtitles[1].Object == nil)
+	check("timed in seconds", first and first.Duration == 3 and first.In == 0.2 and first.Out == 0.4 and first.Entrance == "Pop" and first.Exit == nil)
+	check("its style is what differs from Eclipse's defaults", first and first.Style.Text == "Hello there" and first.Style.Speaker == "Guide" and first.Style.Size == 34 and first.Style.Color == "FFDC54" and first.Style.Font == nil)
+	check("its keys are what changes", first and first.Keys and #first.Keys == 1 and first.Keys[1][1] == 1.5 and first.Keys[1][2].Size == 40 and first.Keys[1][2].Text == nil and first.Keys[1][3] == "Linear")
+	local second = subtitles[2] and subtitles[2].Subtitle
+	check("a subtitle keeps its Order and motions", second and second.Order == 2 and second.Exit == "None" and second.Entrance == "Typewriter" and second.Keys == nil)
+
+	local source = Formatter.format({ TableName = "Talk", Lifetime = 4, CueTolerance = 0.1, Runtime = true, FPS = 30, Cues = result.Cues })
+	check(
+		"subtitles are written as data",
+		string.find(source, '[10] = { Effect = "Subtitle", Subtitle = {\n\t\t\tDuration = 3, In = 0.2, Out = 0.4, Entrance = "Pop",\n\t\t\tStyle = { Text = "Hello there", Speaker = "Guide", Color = "FFDC54", Size = 34 },\n\t\t\tKeys = {\n\t\t\t\t{ 1.5, { Size = 40 }, "Linear" },', 1, true) ~= nil,
+		source
+	)
+
+	-- Played: drawn on the player's screen as Eclipse draws it, then gone.
+	local Talk = loadData(source)
+	local Sequence = __load("Sequence")
+	local gui = Instance.new("Folder", { Name = "PreviewGui" })
+	Sequence.Preview = { GuiParent = gui }
+	local sequence = Sequence.new(Talk, rig)
+	local frame = sequence:Spawn(Talk.Cues[10], nil, {})
+	local screen = gui:FindFirstChild("SequenceSubtitles")
+	check("a subtitle shows on the screen", frame ~= nil and screen ~= nil and frame.Parent == screen)
+	local content = frame and frame:FindFirstChild("Reveal") and frame:FindFirstChild("Reveal"):FindFirstChild("Content")
+	local word = content and content:FindFirstChild("Word1")
+	check("its words are drawn in its size and colour", word and word.Text == "Hello" and word.TextColor3 == Color3.fromHex("FFDC54") and word.TextSize == 34, word and word.Text)
+	local speaker = content and content:FindFirstChild("Speaker")
+	check("under its speaker's name", speaker and speaker.Text == "Guide")
+	local scale = frame and frame:FindFirstChildOfClass("UIScale")
+	local small = scale and scale.Scale
+	check("it pops in from small", small and near(small, 0.55, 1e-6), small)
+	for _ = 1, 15 do
+		step()
+	end
+	check("to its size", scale and near(scale.Scale, 1, 1e-6), scale and scale.Scale)
+	for _ = 1, 200 do
+		step()
+	end
+	check("and it's gone after its duration", frame and frame.Parent == nil)
+
+	-- One that types itself out shows its letters a few at a time.
+	local typed = sequence:Spawn(Talk.Cues[70], nil, {})
+	local runWord = typed and typed:FindFirstChild("Reveal"):FindFirstChild("Content"):FindFirstChild("Word1")
+	for _ = 1, 30 do
+		step()
+	end
+	check("a typewriter subtitle reveals its letters", runWord and runWord.MaxVisibleGraphemes == 2, runWord and runWord.MaxVisibleGraphemes)
+	sequence:Stop()
+	check("Stop removes it", typed and typed.Parent == nil)
+	Sequence.Preview = nil
+
+	-- A subtitle-only event on an item (an older project's) isn't an event, just a subtitle.
+	resetGame()
+	local old = Instance.new("Model", { Name = "Old", Parent = ws })
+	Instance.new("Part", { Name = "HumanoidRootPart", Parent = old })
+	local legacy = eclipseProject("Legacy", { FPS = 30 }, { { Rig = old, Events = { { Frame = 12, Name = "" } } } })
+	local node = legacy:FindFirstChild("Rigs"):FindFirstChild("Old"):FindFirstChild("Animation"):FindFirstChild("EclipseEvents"):FindFirstChild("Event1")
+	node:FindFirstChild("Markers").Value = "[]"
+	value("StringValue", "Subtitle", json(hello), node)
+	local legacyAnim = EclipseReader.load(legacy)
+	check("an older project's subtitle is read from its item's event", #legacyAnim.Subtitles == 1 and legacyAnim.Subtitles[1].Frame == 12 and #legacyAnim.Items[1].Markers == 0)
+end
+
+-- Eclipse's ITEM menu gets an Export VFX row -----------------------------------------------------
+
+do
+	local EclipseHook = __load("EclipseHook")
+	-- Eclipse's window as it builds it: its menus once its animator has opened, and the project box.
+	local core = Instance.new("CoreGui", { Name = "CoreGui", Parent = game })
+	local gui = Instance.new("ScreenGui", { Name = "Eclipse Animator [Animator] abc", Enabled = true, Parent = core })
+	gui:SetAttribute("EclipseInstance", "abc")
+	local menus = Instance.new("Folder", { Name = "MenuBarDropdowns", Parent = gui })
+	local menu = Instance.new("Frame", { Name = "MenuItem", Visible = true, Parent = menus })
+	local content = Instance.new("Frame", { Name = "Content", Parent = menu })
+	for order, id in { "DeleteItem", "AddFolder", "AddCamera", "AddEffects" } do
+		local row = Instance.new("Frame", { Name = id, LayoutOrder = order, Parent = content })
+		local button = Instance.new("TextButton", { Name = id .. "Button", BackgroundTransparency = 1, Parent = row })
+		Instance.new("TextLabel", { Name = "Title", Text = id, Parent = button })
+		Instance.new("ImageLabel", { Name = "Icon", Image = "rbxassetid://1", Parent = button })
+		Instance.new("TextLabel", { Name = "Keybind", Text = "", Parent = button })
+		Instance.new("ImageLabel", { Name = "Check", Parent = button })
+	end
+	local effects = Instance.new("Frame", { Name = "MenuEffects", Visible = true, Parent = menus })
+	local nameBox = Instance.new("Frame", { Name = "ProjectName", Parent = Instance.new("Frame", { Name = "RightDiv", Parent = gui }) })
+	local box = Instance.new("TextBox", { Name = "Edit", Text = "Slam", PlaceholderText = "Slam", Parent = nameBox })
+
+	check("finds the project open in Eclipse by its name", EclipseHook.openProjectName() == "Slam")
+	box.Text, box.PlaceholderText = "", "Eclipse Animation"
+	check("and none when it hasn't been named", EclipseHook.openProjectName() == nil)
+	box.Text = "Slam"
+
+	local exported = nil
+	local hook = EclipseHook.new(function(name)
+		exported = name
+	end)
+	local row = content:FindFirstChild("VFXExporterRow")
+	local button = row and row:FindFirstChildWhichIsA("GuiButton")
+	check("Eclipse's ITEM menu gets an Export VFX row, at the bottom", row and row.LayoutOrder == 5 and button and button:FindFirstChild("Title").Text == "Export VFX")
+	check("with Eclipse's export icon", button and button:FindFirstChild("Icon").Image == "rbxassetid://136636358423324")
+	button.MouseEnter:Fire()
+	check("lit up like Eclipse's rows when hovered", button.BackgroundTransparency == 0 and button.BackgroundColor3 == Color3.fromRGB(34, 0, 52) and effects.Visible == false)
+	button.MouseButton1Click:Fire()
+	check("picking it closes the menu and exports the project open in Eclipse", exported == "Slam" and menu.Visible == false, exported)
+	hook:Refresh()
+	local rows = 0
+	for _, child in content:GetChildren() do
+		if child.Name == "VFXExporterRow" then
+			rows += 1
+		end
+	end
+	check("it's added once", rows == 1, rows)
+	hook:Destroy()
+	check("and goes when the plugin does", content:FindFirstChild("VFXExporterRow") == nil)
+	core.Parent = nil
+end
+
+-- Moon's Subtitles ------------------------------------------------------------------------------
+
+do
+	local Sequence = __load("Sequence")
+	local function subtitlesItem(tracks)
+		return {
+			Path = "game.CoreGui.MoonAnimatorEffects.Subtitles",
+			PathNames = { "game", "CoreGui", "MoonAnimatorEffects", "Subtitles" },
+			PathTypes = { "DataModel", "CoreGui", "ScreenGui", "TextLabel" },
+			ItemType = "TextLabel",
+			Markers = {},
+			Defaults = {},
+			Tracks = tracks,
+		}
+	end
+	local held = { Type = "Constant", Params = {} }
+	local lines = subtitlesItem({
+		Text = { { Time = 30, Value = "", Ease = held }, { Time = 40, Value = "Get back here!", Ease = held } },
+		MaxVisibleGraphemes = { { Time = 40, Value = 0 }, { Time = 70, Value = 14 } },
+	})
+	local cue = Exporter.screenCue(lines :: any, 60, 300)
+	local screen = cue and cue.Screen
+	check("Moon's Subtitles are a text label on the screen, as Moon makes it", cue and cue.Frame == 30 and screen.ClassName == "TextLabel" and screen.Properties.TextYAlignment ~= nil and screen.Properties.FontFace ~= nil)
+	check("sized for the player's screen from Moon's 72", screen and screen.ScaleText == true and screen.Properties.TextSize == 72)
+	check("its last line stays up until the animation ends", screen and near(screen.Hold, (300 - 30) / 60, 1e-6), screen and screen.Hold)
+	check("its lines and their typing are its keys", screen and #screen.Keys.Text == 2 and #screen.Keys.MaxVisibleGraphemes == 2)
+
+	local source = Formatter.format({ TableName = "Fx", Lifetime = 1, CueTolerance = 0.1, Runtime = true, FPS = 60, Cues = { cue } })
+	check("written to scale its text", string.find(source, '{ Effect = "Subtitles", Screen = "TextLabel", Hold = 4.5, ScaleText = true, Properties = {', 1, true) ~= nil and string.find(source, 'FontFace = Font.new("rbxasset://fonts/families/SourceSansPro.json"', 1, true) ~= nil, source)
+	local Fx = loadData(source, { UDim2 = UDim2, Enum = Enum, Color3 = Color3, Font = Font })
+	local camera = Instance.new("Camera", { Name = "Camera", ViewportSize = Vector2.new(1280, 720), Parent = workspace })
+	workspace.CurrentCamera = camera
+	Sequence.Preview = { GuiParent = Instance.new("Folder", { Name = "PreviewGui" }) }
+	local sequence = Sequence.new(Fx, Instance.new("Model", { Name = "Character" }))
+	local label = sequence:Spawn(Fx.Cues[30], nil, {})
+	check("played, its text is sized for the screen", label and label.TextSize == 48, label and label.TextSize)
+	for _ = 1, 12 do
+		step()
+	end
+	check("and shows Moon's line", label and label.Text == "Get back here!", label and label.Text)
+	sequence:Stop()
+	Sequence.Preview = nil
+	workspace.CurrentCamera = nil
+end
+
+-- Events that emit with a module of the game's own --------------------------------------------
+
+check("a cloned require is written as a plain one", Exporter.withoutClonedRequires('local A = require(game:GetService("ReplicatedStorage").Utilities.VFX:Clone())\nlocal B = require(script.Parent.B)') == 'local A = require(game:GetService("ReplicatedStorage").Utilities.VFX)\nlocal B = require(script.Parent.B)')
+
+do
+	resetGame()
+	local ws = game:GetService("Workspace")
+	local replicated = Instance.new("ReplicatedStorage", { Name = "ReplicatedStorage", Parent = game })
+	local utilities = Instance.new("Folder", { Name = "Utilities", Parent = replicated })
+	local vfxModule = Instance.new("ModuleScript", { Name = "VFX", Parent = utilities })
+	Instance.new("Folder", { Name = "WallCombo", Parent = ws })
+
+	local rig = Instance.new("Model", { Name = "Slinky", Parent = ws })
+	local root = Instance.new("Part", { Name = "HumanoidRootPart", CFrame = CFrame.new(0, 3, 0), Parent = rig })
+	Instance.new("Humanoid", { Name = "Humanoid", Parent = rig })
+	local walls = {}
+	for i = 1, 5 do
+		walls[i] = Instance.new("Part", { Name = "WallImpact" .. i, CFrame = CFrame.new(0, 3 + i, -3), Parent = ws })
+		Instance.new("ParticleEmitter", { Name = "Debris", Rate = 20, Parent = walls[i] })
+	end
+	local forge = Instance.new("Part", { Name = "Dust", CFrame = CFrame.new(0, 3, -6), Parent = ws })
+
+	local function emitCode(target: string, extra: string?)
+		return `local Unti = require(game.ReplicatedStorage.Utilities.VFX:Clone())\nlocal TARGET_PART = workspace:WaitForChild("{target}") -- dynamically replaced\nUnti:Emit(TARGET_PART)` .. (extra or "")
+	end
+	local function event(frame: number, code: string)
+		return { Frame = frame, Name = "", Width = 0, Code = { code }, Keys = {} }
+	end
+	local strongKick = '\n\nlocal meshEmit = require(game.ReplicatedFirst.MoonAnimatorModules.MeshEmit)\n\nlocal meshes = workspace["WallCombo"]["Strong Kick"]\nfor _, v in meshes:GetChildren() do\n\tmeshEmit(v.Start)\nend'
+	local function animation(markers)
+		return {
+			Name = "Wall",
+			Length = 200,
+			FPS = 60,
+			Items = {
+				{
+					Index = 1,
+					Path = "Game.Workspace.Slinky",
+					PathNames = { "Game", "Workspace", "Slinky" },
+					PathTypes = { "DataModel", "Workspace", "Model" },
+					ItemType = "Rig",
+					Instance = rig,
+					Tracks = {},
+					Defaults = {},
+					Markers = markers,
+					Joints = {},
+				},
+			},
+		}
+	end
+
+	local result = Exporter.collect(animation({
+		event(35, emitCode("WallImpact1")),
+		event(58, emitCode("WallImpact2")),
+		event(84, emitCode("WallImpact2")),
+		event(105, emitCode("WallImpact3")),
+		event(175, emitCode("WallImpact5", strongKick)),
+	}), { EffectName = "Event", FrameRate = 60 })
+	local byFrame = {}
+	for _, cue in result.Cues do
+		byFrame[cue.Frame] = cue
+	end
+	local name = "ReplicatedStorage.Utilities.VFX:Emit"
+	check("an event that only emits with a module is a cue for what it emits", byFrame[35] and byFrame[35].Object == walls[1] and byFrame[84] and byFrame[84].Object == walls[2])
+	check("and has no Function: the Sequence emits through the module", byFrame[35] and byFrame[35].Code == nil and type(byFrame[35].Emitter) == "table" and byFrame[35].Emitter.Name == name, byFrame[35] and byFrame[35].Code)
+	local kick = byFrame[175]
+	check("what else the code does stays in its Function", kick and kick.Code and string.find(kick.Code, "meshEmit(v.Start)", 1, true) ~= nil and string.find(kick.Code, "Unti", 1, true) == nil and string.find(kick.Code, "TARGET_PART", 1, true) == nil, kick and kick.Code)
+	check("and it isn't emitted twice", kick and type(kick.Emitter) == "table" and kick.Emitter.Name == name)
+
+	local source = Formatter.format({ TableName = "MoonAnimation", Lifetime = 5, CueTolerance = 0.15, Runtime = true, FPS = 60, Cues = result.Cues })
+	check("the export clones nothing", string.find(source, "Clone()", 1, true) == nil, source)
+	check("and only names the emitter: the Sequence requires it", string.find(source, `\tEmitter = "{name}",`, 1, true) ~= nil and string.find(source, "require(game.ReplicatedStorage.Utilities.VFX)", 1, true) == nil, source)
+	local _, functions = string.gsub(source, ", Function = function%(", "")
+	check("only the cue doing more than emitting has a Function", functions == 1, functions)
+
+	-- In game, the Sequence requires the module once, and emits each cue's VFX with it once.
+	local emittedWith = {}
+	local requiredFor = 0
+	vfxModule.Returns = {
+		Emit = function(self, object)
+			table.insert(emittedWith, { self, object })
+		end,
+	}
+	local Sequence = __load("Sequence")
+	local Data = loadData(source)
+	local vfx = Instance.new("Folder", { Name = "VFX" })
+	for i = 1, 3 do
+		walls[i]:Clone().Parent = vfx
+	end
+	local sequence = Sequence.new(Data, rig)
+	local spawned = sequence:Spawn(Data.Cues[35], nil, vfx)
+	local again = sequence:Spawn(Data.Cues[58], nil, vfx)
+	check("the Sequence emits each cue's VFX with the module the animation names", #emittedWith == 2 and emittedWith[1][2] == spawned and emittedWith[2][2] == again and spawned ~= nil, #emittedWith)
+	check("as a method of the module, like the events called it", emittedWith[1] and emittedWith[1][1] == vfxModule.Returns)
+	check("finding the module once", Sequence.Emitter(name) == Sequence.Emitter(name))
+	sequence:Stop()
+
+	-- A missing emitter is a warning, and the Sequence's own emit stands in.
+	local lost = Sequence.new({ Lifetime = 1, FrameRate = 60, Emitter = "ReplicatedStorage.Missing:Emit", Cues = { [0] = { Effect = "WallImpact1", Offset = CFrame.new() } } }, rig)
+	table.clear(warnings)
+	local shown = lost:Spawn(lost.Animation.Cues[0], nil, vfx)
+	check("an emitter that isn't there is a warning, not an error", shown ~= nil and warnings[1] and string.find(warnings[1], "ReplicatedStorage.Missing:Emit", 1, true) ~= nil, warnings[1])
+	lost:Stop()
+
+	-- Mixed with VFX Forge, each cue says how it's emitted.
+	local mixed = Exporter.collect(animation({
+		event(10, emitCode("WallImpact1")),
+		event(20, 'shared.vfx.emit(workspace.Dust)'),
+	}), { EffectName = "Event", FrameRate = 60 })
+	local mixedSource = Formatter.format({ TableName = "Mixed", Lifetime = 5, CueTolerance = 0.15, Runtime = true, FPS = 60, Cues = mixed.Cues })
+	check("with VFX Forge as well, the module cue names its own Emitter", string.find(mixedSource, `, Emitter = "{name}"`, 1, true) ~= nil and string.find(mixedSource, "\tEmitter = ", 1, true) == nil, mixedSource)
+	check("and the VFX Forge cue is emitted the Sequence's way", mixed.Cues[2] and mixed.Cues[2].Object == forge and mixed.Cues[2].DefaultEmit == true)
+
+	-- An emit inside other code stays in it, and the Sequence leaves emitting to it.
+	local looped = Exporter.collect(animation({
+		event(10, 'local Unti = require(game.ReplicatedStorage.Utilities.VFX)\nif math.random() > 0.5 then\n\tUnti:Emit(workspace.WallImpact1)\nend'),
+	}), { EffectName = "Event", FrameRate = 60 })
+	local cue = looped.Cues[1]
+	check("an emit inside an if stays in the Function, and the Sequence doesn't emit too", cue and cue.Object == walls[1] and cue.Emitter == false and cue.Code and string.find(cue.Code, "Unti:Emit", 1, true) ~= nil)
+	local loopedSource = Formatter.format({ TableName = "Looped", Lifetime = 5, CueTolerance = 0.15, Runtime = true, FPS = 60, Cues = looped.Cues })
+	check("it's written Emitter = false", string.find(loopedSource, "Emitter = false", 1, true) ~= nil)
+
+	local Looped = loadData(loopedSource, {
+		game = { ReplicatedStorage = { Utilities = { VFX = vfxModule } } },
+		require = function()
+			requiredFor += 1
+			return vfxModule.Returns
+		end,
+		math = { random = function() return 1 end },
+	})
+	table.clear(emittedWith)
+	local held = Sequence.new(Looped, rig)
+	held:Spawn(Looped.Cues[next(Looped.Cues)], nil, vfx)
+	check("the Function emits it, once", #emittedWith == 1 and requiredFor == 1, #emittedWith)
+	held:Stop()
+
+	-- An emitter that's somewhere the Sequence can't find by name stays in the code.
+	local local_ = Exporter.collect(animation({
+		event(10, 'local Unti = require(script.Parent.VFX)\nUnti:Emit(workspace.WallImpact1)'),
+	}), { EffectName = "Event", FrameRate = 60 })
+	check("a module that isn't in the place stays in the Function", local_.Cues[1] and local_.Cues[1].Emitter == false and local_.Cues[1].Code ~= nil)
 end
 
 print(`{passed} passed, {failed} failed`)
