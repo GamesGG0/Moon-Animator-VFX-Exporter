@@ -4,6 +4,8 @@ A Roblox Studio plugin that turns the events in a [Moon Animator 2](https://crea
 
 ## [Download on the Creator Store](https://create.roblox.com/store/asset/88386490728445/VFX-Exporter)
 
+**[Watch the demo video](docs/demo.mp4)**
+
 Instead of scrubbing to every VFX event and printing `HumanoidRootPart.CFrame:ToObjectSpace(part.CFrame)` by hand, the plugin reads the saved animation and writes the whole cue table for you:
 
 ```lua
