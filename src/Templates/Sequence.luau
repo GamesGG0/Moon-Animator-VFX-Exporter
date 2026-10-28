@@ -25,7 +25,7 @@
 		           (say, Play was called partway through the track) before it's skipped. Frame-rate
 		           dips and hitches never skip cues. Defaults to the table's CueTolerance, or no limit.
 
-	sequence:Play(track, data, vfx)
+	sequence:Play(track, data, vfx, options)
 		Client only (a LocalScript): on the server it warns and plays nothing. To show a move to
 		every player, have each client play it on that player's character.
 		track  Optional. The AnimationTrack to keep in time with; call Play right after track:Play().
@@ -34,6 +34,11 @@
 		       characters for cues that were on other rigs in Moon: { Rigs = { TemplateR6 = victim } }.
 		vfx    Required. The VFX objects the cues use, by name: { [Name] = Instance }. A cue's name is
 		       its Object, or its Effect when it has no Object. A Folder holding them works too.
+		options Optional. { IncludeScreenEffects = boolean }: whether this player sees the move's
+		       screen effects (its subtitles, overlays, camera shakes, Lighting and camera changes,
+		       and VFX in front of the camera). true shows them, say for everyone in the move (its
+		       victims too); false hides them, say for the players watching it. Its other VFX show
+		       either way. Left out, only the player whose character a cue plays on sees them.
 
 	sequence:Stop()
 		Cancels the cues still to come and removes everything the sequence spawned: its VFX, its
@@ -96,13 +101,15 @@
 		          put back (a Screen is shown for its Hold seconds, too, when that's longer).
 		          "Shake" shakes the camera as Eclipse's Camera Shake does: Keys are its Strength
 		          (0 to 100), Speed and Enabled; Seed picks its pattern, Phase where in it it starts.
-		Function  function(self, effect, character, cue, data), run when it fires, after its VFX
-		          spawns. self is the sequence (for self:AddToCleaner), effect its VFX (or nil),
-		          character the one it plays on, data what was given to Play. If it errors, that's a
-		          warning, and the other cues still play.
+		Function  function(self, effect, character, cue, data, includeScreenEffects), run when it
+		          fires, after its VFX spawns. self is the sequence (for self:AddToCleaner), effect
+		          its VFX (or nil), character the one it plays on, data what was given to Play, and
+		          includeScreenEffects whether this player sees the cue's screen effects (as Play's
+		          IncludeScreenEffects decides), for showing your own only to them. If it errors,
+		          that's a warning, and the other cues still play.
 	A cue with no Offset (and no Object) has no VFX: it's a subtitle, a screen, Lighting or camera
 	effect, or just its Function. Subtitles and screen, Lighting and camera effects show only for the
-	player whose character played them.
+	player whose character played them, unless Play's IncludeScreenEffects says otherwise.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -110,7 +117,7 @@ local RunService = game:GetService("RunService")
 local module = {}
 
 -- The VFX Exporter replaces older versions of this module that it finds next to its exports.
-module.Version = 12
+module.Version = 13
 
 -- VFX play only on the client. On the server, Play and Spawn warn and do nothing.
 local function OnServer(Method)
@@ -456,9 +463,13 @@ end
 
 -- Whether this player sees a screen effect played by Character's move: screen effects, and Lighting
 -- and camera effects, show only for the player whose character played them.
+-- Character can also be true or false, to show it here or not whoever played it.
 local function ShowsHere(Character)
 	if module.Preview then
 		return true
+	end
+	if type(Character) == "boolean" then
+		return Character
 	end
 	local Players = game:GetService("Players")
 	local Player = Players and Players.LocalPlayer
@@ -1598,12 +1609,20 @@ end
 
 -- Plays the cues: in time with Track if there is one, otherwise by the clock from now. Data goes to
 -- every cue's Function; VFX holds the objects the cues use, by name (see the top of this module).
-function Class:Play(Track, Data, VFX)
+-- Options is { IncludeScreenEffects }: whether this player sees its screen effects.
+function Class:Play(Track, Data, VFX, Options)
 	if OnServer("Play") then
 		return
 	end
 	if type(VFX) ~= "table" and typeof(VFX) ~= "Instance" then
 		error(`Sequence:Play needs the VFX the cues use as its third argument, \{ [Name] = Instance }, got {typeof(VFX)}`, 2)
+	end
+	if Options ~= nil and type(Options) ~= "table" then
+		error(`Sequence:Play's options must be a table, \{ IncludeScreenEffects = true }, got {typeof(Options)}`, 2)
+	end
+	local Include = Options and Options.IncludeScreenEffects
+	if Include ~= nil and type(Include) ~= "boolean" then
+		error(`Sequence:Play's IncludeScreenEffects must be true, false or nil, got {typeof(Include)}`, 2)
 	end
 
 	if typeof(Track) ~= "Instance" and type(Track) == "table" then
@@ -1622,6 +1641,7 @@ function Class:Play(Track, Data, VFX)
 	self.Track = Track
 	self.Data = Data
 	self.VFX = VFX
+	self.IncludeScreenEffects = Include
 	self._Warned = {}
 	module.Preload(self.Animation, VFX)
 
@@ -1781,6 +1801,15 @@ function Class:AddToCleaner(Thing, Lifetime)
 	return Thing
 end
 
+-- Who decides whether this player sees a screen effect played on Character: whether Play was told
+-- to include them (true or false), or else Character.
+function Class:_Viewer(Character)
+	if self.IncludeScreenEffects ~= nil then
+		return self.IncludeScreenEffects
+	end
+	return Character
+end
+
 -- Places a copy of Template for Cue on Character, emits it and plays its Keys. It's removed after
 -- its Lifetime, or when the sequence stops.
 function Class:_Place(Template, Cue, Character)
@@ -1793,7 +1822,7 @@ function Class:_Place(Template, Cue, Character)
 	local AnchorCFrame, AnchorPart, Follow = Root.CFrame, Root, false
 	local Camera = if Cue.Parent == "Camera" then workspace.CurrentCamera else nil
 	-- In front of the camera, it's a screen effect: only the player whose character played it sees it.
-	if Cue.Parent == "Camera" and not ShowsHere(Character) then
+	if Cue.Parent == "Camera" and not ShowsHere(self:_Viewer(Character)) then
 		return nil
 	end
 	if Camera then
@@ -1930,14 +1959,15 @@ function Class:Spawn(Cue, Data, VFX)
 	end
 
 	local Effect = nil
+	local Viewer = self:_Viewer(Character)
 	if Cue.Subtitle then
-		local Frame, Remove = module.Subtitle(Character, Cue.Subtitle)
+		local Frame, Remove = module.Subtitle(Viewer, Cue.Subtitle)
 		if Remove then
 			self:_Track(Remove)
 		end
 		Effect = Frame
 	elseif Cue.Screen then
-		local Object, Remove = module.ScreenEffect(Character, Cue.Screen, Cue.Properties, Cue.Keys, Cue.Hold, Cue.Children, Cue.Path, { ScaleText = Cue.ScaleText })
+		local Object, Remove = module.ScreenEffect(Viewer, Cue.Screen, Cue.Properties, Cue.Keys, Cue.Hold, Cue.Children, Cue.Path, { ScaleText = Cue.ScaleText })
 		if Remove then
 			self:_Track(Remove)
 		end
@@ -1946,9 +1976,9 @@ function Class:Spawn(Cue, Data, VFX)
 		local Helper = TargetEffects[Cue.Target]
 		local PutBack
 		if Cue.Target == "Shake" then
-			_, PutBack = module.CameraShake(Character, Cue.Keys or {}, Cue.Hold, Cue.Seed, Cue.Phase)
+			_, PutBack = module.CameraShake(Viewer, Cue.Keys or {}, Cue.Hold, Cue.Seed, Cue.Phase)
 		elseif Helper then
-			_, PutBack = module[Helper](Character, Cue.Keys or {}, Cue.Hold)
+			_, PutBack = module[Helper](Viewer, Cue.Keys or {}, Cue.Hold)
 		else
 			self:_WarnOnce("Target " .. tostring(Cue.Target), `[Sequence] Unknown Target "{Cue.Target}"; it can be "Lighting", "Camera" or "Shake"`)
 		end
@@ -1968,7 +1998,7 @@ function Class:Spawn(Cue, Data, VFX)
 	-- A Function that fails (code that isn't supported in game, say) is a warning, and the other cues
 	-- carry on.
 	if Cue.Function then
-		local Ran, Problem = pcall(Cue.Function, self, Effect, Character, Cue, Data)
+		local Ran, Problem = pcall(Cue.Function, self, Effect, Character, Cue, Data, ShowsHere(Viewer))
 		if not Ran then
 			local Key = "?"
 			for Frame, Other in self.Animation.Cues do

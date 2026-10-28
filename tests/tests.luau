@@ -1294,7 +1294,7 @@ end)]])
 	check("code that can't run in game is a warning when exporting", codeWarning ~= nil and string.find(codeWarning, "frame 30", 1, true) ~= nil, codeWarning)
 	check("and its Function warns when it runs instead of doing nothing quietly", string.find(source, '\t\t\twarn("[VFX Exporter] Cue [30] \\"Barrel\\" runs event code from Moon that uses Crate', 1, true) ~= nil)
 	check("what the code makes goes to the sequence's cleaner", string.find(source, "\t\t\thighlight.Parent = victim\n\t\t\tself:AddToCleaner(highlight)\n", 1, true) ~= nil and string.find(source, "\t\t\tend)\n\t\t\tself:AddToCleaner(connection)\n", 1, true) ~= nil)
-	check("the Function gets the sequence as self", string.find(source, "Function = function(self, effect, character, cue, data)", 1, true) ~= nil)
+	check("the Function gets the sequence as self", string.find(source, "Function = function(self, effect, character, cue, data, includeScreenEffects)", 1, true) ~= nil)
 	check("its loops don't use ipairs or pairs", string.find(source, "ipairs", 1, true) == nil and string.find(source, "for _, child in attachment:GetChildren() do", 1, true) ~= nil)
 
 	-- In game: the copy follows the root, and the code's connection drives the copy's beams.
@@ -1428,6 +1428,40 @@ do
 	local other = Instance.new("Model", { Name = "Other" })
 	Instance.new("Part", { Name = "HumanoidRootPart", Parent = other })
 	check("another player's camera effect isn't shown here", __load("Sequence").new(Fx, other):Spawn(Fx.Cues[0], nil, vfx) == nil)
+
+	-- Play's IncludeScreenEffects says whether this player sees them, whoever's move it is.
+	local included = __load("Sequence").new(Fx, other)
+	included:Play(nil, nil, vfx, { IncludeScreenEffects = true })
+	included:Stop()
+	local shown = included:Spawn(Fx.Cues[0], nil, vfx)
+	check("IncludeScreenEffects = true shows another player's camera effect here", shown ~= nil and cfNear(shown.CFrame, camera.CFrame * CFrame.new(0, 0, -3)))
+	included:Stop()
+	check("and Stop removes it", shown and shown.Parent == nil)
+	local excluded = __load("Sequence").new(Fx, character)
+	excluded:Play(nil, nil, vfx, { IncludeScreenEffects = false })
+	excluded:Stop()
+	check("IncludeScreenEffects = false hides this player's own", excluded:Spawn(Fx.Cues[0], nil, vfx) == nil)
+	local inWorld = excluded:Spawn({ Effect = "A2", Offset = CFrame.new(0, 0, -3) }, nil, vfx)
+	check("but not the VFX in the world", inWorld ~= nil and inWorld.Parent ~= nil)
+	local hiddenZoom = loadData(fovSource)
+	excluded:Spawn(hiddenZoom.Cues[230], nil, vfx)
+	for _ = 1, 6 do
+		step()
+	end
+	check("camera changes too", camera.FieldOfView == 60, camera.FieldOfView)
+	excluded:Stop()
+	-- And it tells the cues' Functions, so they can show their own only to those players too.
+	local told = {}
+	local note = { Effect = "Note", Function = function(_self, _effect, _character, _cue, _data, includeScreenEffects)
+		table.insert(told, includeScreenEffects)
+	end }
+	sequence:Spawn(note, nil, vfx)
+	__load("Sequence").new(Fx, other):Spawn(note, nil, vfx)
+	included:Spawn(note, nil, vfx)
+	excluded:Spawn(note, nil, vfx)
+	check("a Function is told whether this player sees the screen effects", told[1] == true and told[2] == false and told[3] == true and told[4] == false, `{told[1]} {told[2]} {told[3]} {told[4]}`)
+	check("options that aren't a table are an error", not pcall(excluded.Play, excluded, nil, nil, vfx, true))
+	check("and so is an IncludeScreenEffects that isn't true or false", not pcall(excluded.Play, excluded, nil, nil, vfx, { IncludeScreenEffects = "yes" }))
 
 	-- The field of view zooms for the player whose character it is, and goes back when it stops.
 	local zoom = loadData(fovSource)
@@ -1645,7 +1679,7 @@ do
 	local chunk, compileError = loadstring(source)
 	check("a module with screen effects compiles", chunk ~= nil, compileError)
 	check("a screen effect is data: its class, look and keys", string.find(source, '{ Effect = "Vignette", Screen = "ImageLabel", Properties = {', 1, true) ~= nil and string.find(source, "}, Keys = {", 1, true) ~= nil and string.find(source, ", Function = ", 1, true) == nil)
-	check("and says who sees them", string.find(source, "-- Screen, Lighting and camera effects show only for the player whose character played them.", 1, true) ~= nil and string.find(source, "ScreenEffectsForEveryone", 1, true) == nil)
+	check("and says who sees them", string.find(source, "-- Screen, Lighting and camera effects show only for the player whose character played them,\n-- unless Play is told otherwise: sequence:Play(track, data, VFX, { IncludeScreenEffects = true }).", 1, true) ~= nil and string.find(source, "ScreenEffectsForEveryone", 1, true) == nil)
 	check("and that it plays on the client", string.find(source, "-- Play it on the client (from a LocalScript)", 1, true) ~= nil)
 
 	local character = Instance.new("Model", { Name = "Character" })

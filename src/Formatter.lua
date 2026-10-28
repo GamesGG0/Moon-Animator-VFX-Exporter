@@ -375,7 +375,7 @@ function Formatter.codeFunction(code: string, asset: string?, adapted: any?, mis
 		return (string.gsub(text, "in Moon", "in " .. tool, 1))
 	end
 
-	local lines = { "function(self, effect, character, cue, data)" }
+	local lines = { "function(self, effect, character, cue, data, includeScreenEffects)" }
 
 	if adapted then
 		table.insert(lines, `\t\t\t-- {marker(Carryover.ADAPTED_MARKER)}`)
@@ -651,14 +651,16 @@ local function usage(spec: Spec, name: string): { string }
 	end
 	if screen then
 		table.insert(lines, "--")
-		table.insert(lines, "-- Screen, Lighting and camera effects show only for the player whose character played them.")
+		table.insert(lines, "-- Screen, Lighting and camera effects show only for the player whose character played them,")
+		table.insert(lines, "-- unless Play is told otherwise: sequence:Play(track, data, VFX, { IncludeScreenEffects = true }).")
 	end
 
 	table.insert(lines, "--")
-	table.insert(lines, "-- Any cue can take Function = function(self, effect, character, cue, data) ... end. It runs")
-	table.insert(lines, "-- when the cue fires, right after its VFX spawns (effect is nil if it has none), and it's kept")
-	table.insert(lines, "-- when the animation is exported again. self is the sequence: self:AddToCleaner(thing) has it")
-	table.insert(lines, "-- clean up something the Function makes, along with its VFX.")
+	table.insert(lines, "-- Any cue can take Function = function(self, effect, character, cue, data, includeScreenEffects)")
+	table.insert(lines, "-- ... end. It runs when the cue fires, right after its VFX spawns (effect is nil if it has none),")
+	table.insert(lines, "-- and it's kept when the animation is exported again. self is the sequence: self:AddToCleaner(thing)")
+	table.insert(lines, "-- has it clean up something the Function makes, along with its VFX. includeScreenEffects is whether")
+	table.insert(lines, "-- this player sees the move's screen effects, for showing your own only to them.")
 
 	if #assets > 0 then
 		table.sort(assets)

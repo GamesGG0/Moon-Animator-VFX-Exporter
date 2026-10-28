@@ -16,7 +16,7 @@ local MoonAnimation = {
 		[0] =   { Effect = "Start",                            Offset = CFrame.new(...) },
 		[27] =  { Effect = "Hit",   Object = "ImpactAnti",     Offset = CFrame.new(...) },
 		[84] =  { Effect = "Shine", Parent = "Right Arm",      Offset = CFrame.new(...) },
-		[106] = { Effect = "Slash",                            Offset = CFrame.new(...), Function = function(self, effect, character, cue, data)
+		[106] = { Effect = "Slash",                            Offset = CFrame.new(...), Function = function(self, effect, character, cue, data, includeScreenEffects)
 			-- your own code
 		end },
 	},
@@ -39,10 +39,10 @@ sequence:Play(track, data, Resources.VFX) -- track and data are optional; the VF
 - **Camera effects.** VFX on the part Moon's camera is attached to get `Parent = "Camera"`, and in game they stay in front of the camera of the player whose character played the move.
 - **Effects that follow a body part.** A cue can have a `Parent`, a part or attachment of the character. The effect spawns there and stays attached.
 - **Keyframed effects.** Effects Moon animates with keyframes instead of events become cues too, at their first key, with the keys as data (`Keys`) that the Sequence replays with Moon's easing: a Highlight flashing its fill, a PointLight pulsing, `Lighting.ExposureCompensation`, the camera's field of view, a part (a BezTrail, say) moving along a path. Lights in a prop are spawned where the prop was; a moving part starts when it starts moving, with its path relative to the character. Such an effect stays until its keys finish, even past the table's `Lifetime`. Lighting and the field of view hold their last values until the animation ends, as in Moon, then go back.
-- **Screen effects too.** Moon's screen effects become cues with their look and keys (`Screen`, `Properties`, `Keys`), which the Sequence replays on the player's screen. That covers its overlays (the vignette, the letterbox, the screen cover) and post effects such as blur and color correction. Overlays Moon builds from several pieces come whole: its vignette is four images tiling the screen, its letterbox two bars. Moon's **Subtitles** come too: their lines and how they type out, with the text sized for the player's screen as Moon sizes it, and the last line up until the animation ends. Only the player whose character it is sees them (Lighting and camera effects too).
+- **Screen effects too.** Moon's screen effects become cues with their look and keys (`Screen`, `Properties`, `Keys`), which the Sequence replays on the player's screen. That covers its overlays (the vignette, the letterbox, the screen cover) and post effects such as blur and color correction. Overlays Moon builds from several pieces come whole: its vignette is four images tiling the screen, its letterbox two bars. Moon's **Subtitles** come too: their lines and how they type out, with the text sized for the player's screen as Moon sizes it, and the last line up until the animation ends. Only the player whose character it is sees them (Lighting and camera effects too), unless you tell `Play` otherwise with `IncludeScreenEffects`.
 - **Subtitles and camera shakes from Eclipse.** Eclipse Animator's subtitles are drawn by the Sequence as Eclipse draws them, with their entrances and exits, letter-by-letter motion, styles and keys, and its camera shakes shake the player's camera with Eclipse's own pattern. See [From Eclipse Animator](#from-eclipse-animator).
 - **Images load ahead of time.** The Sequence preloads the images its ImageLabels show, once per client, so an overlay doesn't pop in late.
-- **Your own code per cue.** An optional `Function` runs when a cue fires, only where you want one: nothing the exporter can express as data gets a Function. It gets the sequence as `self` and whatever `data` you passed to `Play`, and it's kept when you export the animation again. Hand `self:AddToCleaner(thing)` anything it makes, and the sequence cleans that up with its VFX.
+- **Your own code per cue.** An optional `Function` runs when a cue fires, only where you want one: nothing the exporter can express as data gets a Function. It gets the sequence as `self`, whatever `data` you passed to `Play`, and whether this player sees the move's screen effects, and it's kept when you export the animation again. Hand `self:AddToCleaner(thing)` anything it makes, and the sequence cleans that up with its VFX.
 - **Event code runs in game.** An event that runs other code in Moon (tweening beams, making a Highlight) becomes a cue with that code in its `Function`. The code used the objects in your Moon scene, so the exporter rewrites them to what they are in game: what the code names becomes `effect`, the spawned copy of it (`workspace:WaitForChild("Runbeams")` becomes `effect`, and its beams, attachments and connections work on the copy); the rig becomes `character`, the one playing the move; and another rig becomes the character you pass in `data.Rigs` (the code only runs when you do). What the code makes and puts in the world, and the connections it makes, are handed to `self:AddToCleaner`, so `sequence:Stop()` removes them too, and its loops are written without `ipairs` or `pairs`. Code that uses anything else from the scene is left commented out, with a note saying what to adapt.
 - **Warnings, not errors.** What can't be exported as it is (event code that can't run in game, a keyed value of a type the module can't write, an emit of something that isn't in the place) is a warning when you export, in the status line and the Output, and the rest of the export goes ahead. In game, a cue's `Function` that errors is a warning too, and the other cues still play.
 - **Other rigs.** Effects on a second rig in the file (a victim, say) get `Rig = "TemplateR6"` and play on the character you pass in `data.Rigs`.
@@ -93,6 +93,26 @@ Without it those cues are skipped, with one warning. Anything else you put in th
 
 `sequence:Play` only plays on the client: called on the server, it warns and plays nothing. To show a move to every player, have each client play it on that player's character (the server can tell them to with a RemoteEvent).
 
+Screen effects (subtitles, overlays, camera shakes, Lighting and camera changes, and VFX in front of the camera) show only for the player whose character played the move. To choose who sees them, say so in `Play`'s options: `true` for the players in the move (its victims too), `false` for the ones watching it. Its other VFX show for everyone either way:
+
+```lua
+-- victims: the characters the move hit (say, sent by the server with the move).
+local inMove = player.Character == character or table.find(victims, player.Character) ~= nil
+sequence:Play(track, data, Resources.VFX, { IncludeScreenEffects = inMove })
+```
+
+Each cue's `Function` is told the same thing as its last argument, `includeScreenEffects`, so your own effects can show for just those players too:
+
+```lua
+Function = function(self, effect, character, cue, data, includeScreenEffects)
+	if includeScreenEffects then
+		local flash = self:AddToCleaner(Instance.new("ColorCorrectionEffect"), 0.2)
+		flash.Brightness = 0.4
+		flash.Parent = workspace.CurrentCamera
+	end
+end
+```
+
 To end the move early (the character got hit, say), call `sequence:Stop()`: the cues still to come are cancelled and everything the sequence spawned is removed, with Lighting and the camera put back. Otherwise, when the track ends, what's already out finishes on its own.
 
 > **Tip:** Animations, VFX, SFX, or anything visual should stay on the client, NEVER on the server.
@@ -115,7 +135,7 @@ What it reads from the project:
   - **Vignette**, **Screen Cover** and **Impact Frames** (one cue per image they show, the built-in White, Black, Burst and Inverse ones included) become screen cues, drawn as Eclipse draws them.
   - **Letterbox**: a solid one is two bars on the screen, sized as Eclipse's cover the view (keyed bar sizes too). One made of effects (beams and particles) is spawned whole in front of the player's camera, faded and tinted as Eclipse paints it.
   - **Camera Shake** becomes a `Target = "Shake"` cue: the Sequence shakes the player's camera with its keyed strength and speed, in the same pattern Eclipse shakes its camera.
-  - One that's still showing when its keys end stays until the animation does. Like screen effects, they're only for the player whose character played the move.
+  - One that's still showing when its keys end stays until the animation does. Like screen effects, they're only for the player whose character played the move (or as `IncludeScreenEffects` says).
 - Items switched off in Eclipse's timeline are left out.
 
 Not exported yet, with a warning when a project has them: a gradient's colour keys (on a letterbox made of effects, its gradient), a keyed **VFX Size** on a letterbox made of effects, and animation layers (only the layer being edited when the project was saved is read). Event sounds aren't VFX, so they're left out.
@@ -176,7 +196,7 @@ Re-exporting rewrites the cues and rebuilds `VFX`. It keeps `Sequence` if one is
 | `Subtitle` | A subtitle to show instead of a VFX, drawn as Eclipse Animator draws them: `{ Duration, In, Out, Entrance, Exit, Order, Style, Keys }`, times in seconds. `Style` is how it looks, as what differs from Eclipse's defaults (`Text`, `Speaker`, `Size`, `Color`, `Font`...), and `Keys` change it as it shows: `{ { seconds, style, "Smooth" \| "Linear" \| "Hold" } }`, each style what differs from `Style`. `Entrance` and `Exit` are Eclipse's motions (`"Fade"` when left out), taking `In` and `Out` seconds. |
 | `Target` | `"Lighting"` or `"Camera"`: `Keys` play on that instead, held for `Hold` seconds, then put back. A `Screen` with a `Hold` is shown for that long, if it's longer than its keys. `"Shake"` shakes the camera as Eclipse's Camera Shake does: `Keys` are its `Strength` (0 to 100), `Speed` and `Enabled`, `Seed` picks its pattern and `Phase` where in it it starts. |
 | `Lifetime` | Optional. Seconds before this cue's VFX is removed, instead of the table's. |
-| `Function` | Optional. `function(self, effect, character, cue, data)`, run right after the cue's VFX spawns. `self` is the sequence, `effect` is `nil` if the cue has no VFX, and `data` is what you passed to `Play`. If it errors (code that isn't supported in game, say), that's a warning, and the other cues still play. A `Function` from before `self` was passed, `function(effect, ...)`, gets it added when you export again. |
+| `Function` | Optional. `function(self, effect, character, cue, data, includeScreenEffects)`, run right after the cue's VFX spawns. `self` is the sequence, `effect` is `nil` if the cue has no VFX, `data` is what you passed to `Play`, and `includeScreenEffects` is whether this player sees the move's screen effects (as `Play`'s `IncludeScreenEffects` decides), for showing your own only to them. If it errors (code that isn't supported in game, say), that's a warning, and the other cues still play. A `Function` from before `self` was passed, `function(effect, ...)`, gets it added when you export again. |
 
 `Lifetime`, `CueTolerance` and `FrameRate` (the rate the cue keys are in) sit at the top of the table, and so does `Emitter` when the events emitted with a module of yours:
 
@@ -192,7 +212,7 @@ That's the ModuleScript from a service down, then the method, called with `:` or
 | | What it does |
 | --- | --- |
 | `Sequence.new(animation, character, frameRate, tolerance)` | A sequence of the exported table's cues, played on `character`. `frameRate` (optional) is the rate the cue keys are in; it defaults to the table's `FrameRate`, or 1 when its keys are in seconds. `tolerance` (optional) is how many seconds a cue may already be overdue when the sequence first reaches it (say, `Play` was called partway through the track) before it's skipped; it defaults to the table's `CueTolerance`, or no limit. Frame-rate dips and hitches never skip cues. |
-| `sequence:Play(track, data, vfx)` | Plays the cues, on the client only: on the server it warns and plays nothing (so does `Spawn`). `track` (optional) is the AnimationTrack to keep in time with; call `Play` right after `track:Play()`. Without one, the cues play by the clock. `data` (optional) goes to every cue's `Function`. `vfx` (required) holds the objects the cues use, by name, or is a Folder of them. |
+| `sequence:Play(track, data, vfx, options)` | Plays the cues, on the client only: on the server it warns and plays nothing (so does `Spawn`). `track` (optional) is the AnimationTrack to keep in time with; call `Play` right after `track:Play()`. Without one, the cues play by the clock. `data` (optional) goes to every cue's `Function`. `vfx` (required) holds the objects the cues use, by name, or is a Folder of them. `options` (optional) is `{ IncludeScreenEffects = true or false }`: whether this player sees the screen effects, whoever's move it is. Left out, only the player whose character a cue plays on does. |
 | `sequence:Stop()` | Cancels the cues still to come and removes everything the sequence spawned: VFX, screen effects, and Lighting and camera changes (put back as they were), and everything added to its cleaner. |
 | `sequence:AddToCleaner(thing, lifetime)` | Has the sequence clean up something a `Function` made, like its VFX: an Instance is destroyed, a connection disconnected, a function called, a thread (from `task.delay`, say) cancelled. That happens when the sequence stops, or after `lifetime` seconds (optional: the animation's `Lifetime`; `math.huge` waits for the stop). Returns `thing`, so `local highlight = self:AddToCleaner(Instance.new("Highlight"))` works. |
 | `sequence:Spawn(cue, data, vfx)` | Fires one cue right away. `data` and `vfx` default to what was given to `Play`. |
@@ -200,7 +220,7 @@ That's the ModuleScript from a service down, then the method, called with `:` or
 | `Sequence.Emit(object, count)` | Fires the effects in a spawned VFX, through VFX Forge's `shared.vfx.emit` when the game has it. Otherwise ParticleEmitters use their `EmitCount`, `EmitDelay` and `EmitDuration` attributes when they have them (`count`, optional, is how many particles each gives off instead: a cue's `EmitCount`), and Sounds play. An export's `Emitter` (or a cue's) is used instead when it names one. To use some other emitter everywhere, replace it: `Sequence.Emit = yourEmit`. |
 | `Sequence.Emitter(name)` | The emitter an export names, such as `"ReplicatedStorage.Utilities.VFX:Emit"`: a function that emits a VFX with that module, which is required once, the first time. Returns `nil` and why when there's no such module or method. |
 
-Its helpers can be used in your own `Function`s too. Each returns what it made or animated, and a function that undoes it now:
+Its helpers can be used in your own `Function`s too. Each returns what it made or animated, and a function that undoes it now. Where a helper takes a `character`, you can pass `true` or `false` instead (such as a Function's `includeScreenEffects`) to show it or not whoever's move it is:
 
 | Helper | What it does |
 | --- | --- |

@@ -25,11 +25,11 @@ local Widget = require(script.Widget)
 
 local SEQUENCE_TEMPLATE = script.Templates.Sequence
 -- The Sequence version exports are written for: Sequence.new(animation, character), with
--- :Play(track, data, vfx) playing the cues' Keys (Bezier ones too), Screen (and its ScaleText),
+-- :Play(track, data, vfx, options) playing the cues' Keys (Bezier ones too), Screen (and its ScaleText),
 -- Subtitle, Target (Shake too), Lifetime and EmitCount fields itself, emitting with the emitter the
--- table or a cue names, calling Functions as Function(sequence, effect, character, cue, data), and
+-- table or a cue names, calling Functions as Function(sequence, effect, character, cue, data, includeScreenEffects), and
 -- cleaning up threads a Function hands it.
-local SEQUENCE_VERSION = 12
+local SEQUENCE_VERSION = 13
 
 -- A Sequence module's version, from its `module.Version = n` line (versions before 2 had none).
 local function sequenceVersion(source: string): number
